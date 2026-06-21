@@ -8,6 +8,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from welcome_card import build_welcome_card, AVATAR_SIZE, AVATAR_POSITION, FONT_SIZE
+from level_up_card import build_level_up_card
 
 load_dotenv()
 
@@ -618,20 +619,36 @@ async def update_levels_task():
                 data_changed = True
 
                 if new_calculated_level > user_levels[user_id]["level"]:
+                    old_lvl = user_levels[user_id]["level"]
                     user_levels[user_id]["level"] = new_calculated_level
                     current_lvl = user_levels[user_id]["level"]
 
                     if log_channel:
-                        embed_lvl = discord.Embed(
-                            title="LEVEL UP!",
-                            description=(
-                                f"{member.mention} reached **Level {current_lvl}**.\n"
-                                f"*Total XP: {user_levels[user_id]['xp']}*"
-                            ),
-                            color=discord.Color.gold(),
-                        )
-                        embed_lvl.set_thumbnail(url=member.display_avatar.url)
-                        await log_channel.send(embed=embed_lvl)
+                        try:
+                            buffer = await build_level_up_card(member, old_lvl, current_lvl)
+                            image_file = discord.File(buffer, filename="level_up.png")
+                            embed_lvl = discord.Embed(
+                                title="LEVEL UP!",
+                                description=(
+                                    f"{member.mention} reached **Level {current_lvl}**.\n"
+                                    f"*Total XP: {user_levels[user_id]['xp']}*"
+                                ),
+                                color=discord.Color.from_rgb(147, 51, 234),
+                            )
+                            embed_lvl.set_image(url="attachment://level_up.png")
+                            await log_channel.send(file=image_file, embed=embed_lvl)
+                        except Exception as e:
+                            print(f"Level up card failed: {e}")
+                            embed_lvl = discord.Embed(
+                                title="LEVEL UP!",
+                                description=(
+                                    f"{member.mention} reached **Level {current_lvl}**.\n"
+                                    f"*Total XP: {user_levels[user_id]['xp']}*"
+                                ),
+                                color=discord.Color.gold(),
+                            )
+                            embed_lvl.set_thumbnail(url=member.display_avatar.url)
+                            await log_channel.send(embed=embed_lvl)
 
                     if current_lvl >= 10 and current_lvl < 20:
                         role = guild.get_role(ROLE_LVL_10)
@@ -670,6 +687,28 @@ async def check_user_level_cmd(ctx, member: discord.Member = None):
     embed_cmd.set_thumbnail(url=target_member.display_avatar.url)
     embed_cmd.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed_cmd)
+
+
+@bot.command(name="testlevelup")
+async def test_levelup_cmd(ctx, member: discord.Member = None, old: int = None, new: int = None):
+    """Preview level-up card (admin). Example: !testlevelup @user 2 3"""
+    target = member or ctx.author
+    user_data = user_levels.get(target.id, {"xp": 0, "level": 5})
+    old_lvl = old if old is not None else max(0, user_data["level"] - 1)
+    new_lvl = new if new is not None else user_data["level"]
+
+    try:
+        buffer = await build_level_up_card(target, old_lvl, new_lvl)
+        image_file = discord.File(buffer, filename="level_up.png")
+        embed = discord.Embed(
+            title="LEVEL UP! (TEST)",
+            description=f"Preview: **{old_lvl} → {new_lvl}** for {target.mention}",
+            color=discord.Color.from_rgb(147, 51, 234),
+        )
+        embed.set_image(url="attachment://level_up.png")
+        await ctx.send(file=image_file, embed=embed)
+    except Exception as e:
+        await ctx.send(f"Level up preview failed: {e}")
 
 
 @bot.command(name="testwelcome")
