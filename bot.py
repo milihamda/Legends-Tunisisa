@@ -633,7 +633,7 @@ async def update_levels_task():
                                     f"{member.mention} reached **Level {current_lvl}**.\n"
                                     f"*Total XP: {user_levels[user_id]['xp']}*"
                                 ),
-                                color=discord.Color.from_rgb(220, 38, 38),
+                                color=discord.Color.from_rgb(231, 76, 60),
                             )
                             embed_lvl.set_image(url="attachment://level_up.png")
                             await log_channel.send(file=image_file, embed=embed_lvl)
@@ -703,7 +703,7 @@ async def test_levelup_cmd(ctx, member: discord.Member = None, old: int = None, 
         embed = discord.Embed(
             title="LEVEL UP! (TEST)",
             description=f"Preview: **{old_lvl} → {new_lvl}** for {target.mention}",
-            color=discord.Color.from_rgb(220, 38, 38),
+            color=discord.Color.from_rgb(231, 76, 60),
         )
         embed.set_image(url="attachment://level_up.png")
         await ctx.send(file=image_file, embed=embed)

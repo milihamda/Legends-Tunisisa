@@ -10,13 +10,13 @@ CARD_SIZE = (920, 180)
 BORDER = 4
 RADIUS = 28
 
-RED = (220, 38, 38)
-RED_LIGHT = (248, 113, 113)
-RED_DARK = (127, 29, 29)
-BG = (12, 6, 6)
-BG_INNER = (20, 10, 10)
+RED = (231, 76, 60)
+RED_LIGHT = (255, 120, 100)
+RED_DARK = (180, 40, 30)
+BG = (16, 8, 8)
+BG_INNER = (28, 12, 12)
 WHITE = (255, 255, 255)
-WATERMARK = (48, 18, 18)
+WATERMARK = (70, 25, 25)
 
 
 def _load_font(size: int, bold: bool = True):
@@ -170,7 +170,7 @@ async def build_level_up_card(member, old_level: int, new_level: int, background
     name = member.display_name
     if len(name) > 18:
         name = name[:16] + "…"
-    name_font = _load_font(34)
+    name_font = _load_font(40)
     draw.text((150, CARD_SIZE[1] // 2), name, font=name_font, fill=WHITE, anchor="lm")
 
     old_x = CARD_SIZE[0] - 230
