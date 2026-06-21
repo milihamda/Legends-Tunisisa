@@ -1,8 +1,10 @@
-import discord
-from discord.ext import commands, tasks
 import json
 import os
+import threading
 
+import discord
+from aiohttp import web
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from welcome_card import build_welcome_card, AVATAR_SIZE, AVATAR_POSITION, FONT_SIZE
@@ -737,4 +739,18 @@ async def on_voice_state_update(member, before, after):
         await before.channel.delete()
 
 
-bot.run(TOKEN)
+def _start_health_server() -> None:
+    port = int(os.environ.get("PORT", "8080"))
+
+    async def health(_: web.Request) -> web.Response:
+        return web.Response(text="Legends Tunisia bot is running")
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    web.run_app(app, host="0.0.0.0", port=port)
+
+
+if __name__ == "__main__":
+    if os.environ.get("PORT"):
+        threading.Thread(target=_start_health_server, daemon=True).start()
+    bot.run(TOKEN)
