@@ -244,32 +244,32 @@ class GameRoleSelect(discord.ui.Select):
         if self.values == ["none"]:
             return await interaction.response.send_message("Roles not configured yet.", ephemeral=True)
 
+        await interaction.response.defer(ephemeral=True)
+
         member = interaction.user
         guild = interaction.guild
         all_game_ids = {g["role_id"] for g in _active_game_roles()}
         selected_ids = {int(v) for v in self.values}
 
-        to_remove = []
-        to_add = []
-        for rid in all_game_ids:
+        game_roles = {
+            role for rid in all_game_ids if (role := guild.get_role(rid)) is not None
+        }
+        new_roles = [role for role in member.roles if role not in game_roles]
+        for rid in selected_ids:
             role = guild.get_role(rid)
-            if not role:
-                continue
-            has = role in member.roles
-            want = rid in selected_ids
-            if has and not want:
-                to_remove.append(role)
-            elif want and not has:
-                to_add.append(role)
+            if role:
+                new_roles.append(role)
 
         try:
-            if to_remove:
-                await member.remove_roles(*to_remove, reason="Game role picker")
-            if to_add:
-                await member.add_roles(*to_add, reason="Game role picker")
+            await member.edit(roles=new_roles, reason="Game role picker")
         except discord.Forbidden:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "I cannot assign these roles. Move my bot role **above** the game roles.",
+                ephemeral=True,
+            )
+        except discord.HTTPException as exc:
+            return await interaction.followup.send(
+                f"Could not update roles right now. Try again in a moment. ({exc.text})",
                 ephemeral=True,
             )
 
@@ -279,7 +279,7 @@ class GameRoleSelect(discord.ui.Select):
         else:
             msg = "All game roles removed."
 
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 class GameRolePickerView(discord.ui.View):

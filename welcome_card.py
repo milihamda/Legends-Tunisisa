@@ -16,6 +16,7 @@ def _load_font(size: int):
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/ARIAL.TTF",
         "C:/Windows/Fonts/calibri.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "arial.ttf",
     ):
         try:

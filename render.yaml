@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: legends-tunisia-bot
+    runtime: docker
+    plan: free
+    branch: first_commit
+    healthCheckPath: /
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
