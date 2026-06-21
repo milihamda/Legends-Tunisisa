@@ -10,13 +10,13 @@ CARD_SIZE = (920, 180)
 BORDER = 4
 RADIUS = 28
 
-PURPLE = (147, 51, 234)
-PURPLE_LIGHT = (167, 139, 250)
-PURPLE_DARK = (76, 29, 149)
-BG = (8, 6, 16)
-BG_INNER = (14, 10, 24)
+RED = (220, 38, 38)
+RED_LIGHT = (248, 113, 113)
+RED_DARK = (127, 29, 29)
+BG = (12, 6, 6)
+BG_INNER = (20, 10, 10)
 WHITE = (255, 255, 255)
-WATERMARK = (32, 20, 48)
+WATERMARK = (48, 18, 18)
 
 
 def _load_font(size: int, bold: bool = True):
@@ -73,8 +73,8 @@ def _circular_avatar(avatar: Image.Image, inner_size: int, ring: int) -> Image.I
     outer = inner_size + ring * 2
     canvas = Image.new("RGBA", (outer, outer), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
-    draw.ellipse((0, 0, outer - 1, outer - 1), fill=(*PURPLE, 255))
-    draw.ellipse((ring, ring, outer - ring - 1, outer - ring - 1), fill=(*PURPLE_LIGHT, 255))
+    draw.ellipse((0, 0, outer - 1, outer - 1), fill=(*RED, 255))
+    draw.ellipse((ring, ring, outer - ring - 1, outer - ring - 1), fill=(*RED_LIGHT, 255))
 
     avatar = avatar.resize((inner_size, inner_size))
     mask = Image.new("L", (inner_size, inner_size), 0)
@@ -85,15 +85,15 @@ def _circular_avatar(avatar: Image.Image, inner_size: int, ring: int) -> Image.I
 
 def _draw_level_badge(base: Image.Image, center: tuple[int, int], level: int):
     radius = 34
-    _draw_glow_circle(base, center, radius, PURPLE)
+    _draw_glow_circle(base, center, radius, RED)
 
     badge = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(badge)
     x, y = center
-    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(*PURPLE_DARK, 255))
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(*RED_DARK, 255))
     draw.ellipse(
         (x - radius + 3, y - radius + 3, x + radius - 3, y + radius - 3),
-        outline=(*PURPLE_LIGHT, 255),
+        outline=(*RED_LIGHT, 255),
         width=3,
     )
     base.alpha_composite(badge)
@@ -109,7 +109,7 @@ def _draw_level_badge(base: Image.Image, center: tuple[int, int], level: int):
 def _draw_arrow(base: Image.Image, x: int, y: int):
     draw = ImageDraw.Draw(base)
     font = _load_font(42)
-    draw.text((x, y), "→", font=font, fill=PURPLE_LIGHT, anchor="mm")
+    draw.text((x, y), "→", font=font, fill=RED_LIGHT, anchor="mm")
 
 
 async def _fetch_avatar(member) -> bytes:
@@ -148,7 +148,7 @@ def _build_canvas(background_bytes: bytes | None) -> Image.Image:
 
     frame = Image.new("RGBA", CARD_SIZE, (0, 0, 0, 0))
     fdraw = ImageDraw.Draw(frame)
-    _rounded_rect(fdraw, (0, 0, CARD_SIZE[0] - 1, CARD_SIZE[1] - 1), RADIUS, fill=None, outline=PURPLE, width=BORDER)
+    _rounded_rect(fdraw, (0, 0, CARD_SIZE[0] - 1, CARD_SIZE[1] - 1), RADIUS, fill=None, outline=RED, width=BORDER)
     bg.alpha_composite(frame)
     return bg
 
@@ -164,7 +164,7 @@ async def build_level_up_card(member, old_level: int, new_level: int, background
     avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
     avatar_img = _circular_avatar(avatar, 88, 6)
     ax, ay = 36, (CARD_SIZE[1] - avatar_img.height) // 2
-    _draw_glow_circle(canvas, (ax + avatar_img.width // 2, ay + avatar_img.height // 2), 50, PURPLE)
+    _draw_glow_circle(canvas, (ax + avatar_img.width // 2, ay + avatar_img.height // 2), 50, RED)
     canvas.alpha_composite(avatar_img, (ax, ay))
 
     name = member.display_name
