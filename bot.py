@@ -1,9 +1,9 @@
 import json
 import os
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import discord
-from aiohttp import web
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
@@ -739,15 +739,20 @@ async def on_voice_state_update(member, before, after):
         await before.channel.delete()
 
 
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Legends Tunisia bot is running")
+
+    def log_message(self, format, *args):
+        pass
+
+
 def _start_health_server() -> None:
     port = int(os.environ.get("PORT", "8080"))
-
-    async def health(_: web.Request) -> web.Response:
-        return web.Response(text="Legends Tunisia bot is running")
-
-    app = web.Application()
-    app.router.add_get("/", health)
-    web.run_app(app, host="0.0.0.0", port=port)
+    HTTPServer(("0.0.0.0", port), _HealthHandler).serve_forever()
 
 
 if __name__ == "__main__":
