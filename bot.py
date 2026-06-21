@@ -1,0 +1,740 @@
+import discord
+from discord.ext import commands, tasks
+import json
+import os
+
+from dotenv import load_dotenv
+
+from welcome_card import build_welcome_card, AVATAR_SIZE, AVATAR_POSITION, FONT_SIZE
+
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    raise SystemExit("Missing DISCORD_TOKEN. Copy .env.example to .env and add your bot token.")
+
+CREATE_CHANNEL_ID = 1517870390968582155
+
+SUPPORT_CHANNEL_ID = 1518020513174130769
+
+VERIFICATION_1_ID = 1517597478378143937
+VERIFICATION_2_ID = 1517666468593143940
+STAFF_ROLE_ID = 1517586424306598140
+
+NOT_VERIFIED_ROLE_ID = 1517593118399139840
+WELCOME_CHANNEL_ID = 1511674200543199333
+
+BOY_ROLE_ID = 1517606739812417647
+GIRL_ROLE_ID = 1517606871064776804
+
+# Support: user HAS any of these roles → no alert (staff/support team)
+SUPPORT_NOTIFY_ROLE_IDS = [
+    1511828976732209252,
+    1517587986756141226,
+    1518010456030183465,
+    1518229368261054647,
+    1518010188685246464,
+    1517605837252853951,
+    1517586424306598140,
+]
+
+# Support: DM sent to members who have these roles when a normal user joins
+STAFF_ROLE_IDS = [
+    STAFF_ROLE_ID,
+    # Add more staff role IDs:
+    # 1517586424306598140,
+]
+
+LEVEL_LOG_CHANNEL_ID = 1517921554510385242
+
+DATA_BACKUP_CHANNEL_ID = 1518023858765168771
+BOT_VOICE_CHANNEL_ID = 1518025649225470072
+
+ROLE_LVL_10 = 1518012453001232526
+ROLE_LVL_20 = 1518012596824047677
+ROLE_LVL_30 = 1518012707553546421
+ROLE_LVL_40 = 1518012815116468284
+ROLE_LVL_50 = 1518012943940325406
+
+intents = discord.Intents.default()
+intents.voice_states = True
+intents.guilds = True
+intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+owners = {}
+user_levels = {}
+DB_FILE = "levels_database.json"
+
+JOIN_TO_CREATE_CHANNELS = {
+    CREATE_CHANNEL_ID: {
+        "name": "{member}'s Lounge",
+        "title": "HUB CENTRAL INTERFACE",
+        "kind": "lounge",
+    },
+    SUPPORT_CHANNEL_ID: {
+        "name": "Support | {member}",
+        "title": "SUPPORT ROOM",
+        "kind": "support",
+    },
+    VERIFICATION_1_ID: {
+        "name": "Verify | {member}",
+        "title": "VERIFICATION ROOM",
+        "kind": "verification",
+    },
+    VERIFICATION_2_ID: {
+        "name": "Verify | {member}",
+        "title": "VERIFICATION ROOM",
+        "kind": "verification",
+    },
+}
+
+
+async def _create_join_to_create_room(member, trigger_channel):
+    """Create a private sub-room when a member joins a join-to-create voice channel."""
+    config = JOIN_TO_CREATE_CHANNELS.get(trigger_channel.id)
+    if not config:
+        return
+
+    guild = member.guild
+    category = trigger_channel.category
+    everyone_role = guild.default_role
+    staff_role = guild.get_role(STAFF_ROLE_ID)
+    boy_role = guild.get_role(BOY_ROLE_ID)
+    girl_role = guild.get_role(GIRL_ROLE_ID)
+
+    overwrites = {
+        everyone_role: discord.PermissionOverwrite(view_channel=False, connect=False, send_messages=False),
+    }
+
+    if config["kind"] == "lounge":
+        if boy_role:
+            overwrites[boy_role] = discord.PermissionOverwrite(
+                view_channel=True, connect=True, speak=True, send_messages=True
+            )
+        if girl_role:
+            overwrites[girl_role] = discord.PermissionOverwrite(
+                view_channel=True, connect=True, speak=True, send_messages=True
+            )
+    elif config["kind"] in ("support", "verification") and staff_role:
+        overwrites[staff_role] = discord.PermissionOverwrite(
+            view_channel=True, connect=True, speak=True, move_members=True
+        )
+
+    overwrites[member] = discord.PermissionOverwrite(
+        view_channel=True, connect=True, speak=True, manage_channels=True
+    )
+
+    channel_name = config["name"].format(member=member.name)
+    new_channel = await guild.create_voice_channel(
+        name=channel_name,
+        category=category,
+        overwrites=overwrites,
+    )
+    owners[new_channel.id] = member.id
+    await member.move_to(new_channel)
+
+    user_data = user_levels.get(member.id, {"xp": 0, "level": 0})
+    embed = discord.Embed(
+        title=config["title"],
+        description=f"Welcome {member.mention}!",
+        color=discord.Color.from_rgb(114, 137, 218),
+    )
+    embed.add_field(name="Owner", value=member.mention, inline=True)
+    embed.add_field(name="Level", value=f"`Level {user_data['level']}`", inline=True)
+    if config["kind"] == "support":
+        embed.add_field(
+            name="Staff",
+            value="Staff members can join this room to help you.",
+            inline=False,
+        )
+    elif config["kind"] == "verification":
+        embed.add_field(
+            name="Staff",
+            value="Please wait — a staff member will join to verify you.",
+            inline=False,
+        )
+    await new_channel.send(embed=embed, view=ControlPanelView(new_channel))
+
+
+async def _notify_roles_members(guild, role_ids, embed):
+    notified = set()
+    for role_id in role_ids:
+        role = guild.get_role(role_id)
+        if not role:
+            continue
+        for role_member in role.members:
+            if role_member.bot or role_member.id in notified:
+                continue
+            notified.add(role_member.id)
+            try:
+                await role_member.send(embed=embed)
+            except discord.Forbidden:
+                pass
+
+
+def _member_has_any_role(member, role_ids):
+    member_role_ids = {r.id for r in member.roles}
+    return any(rid in member_role_ids for rid in role_ids)
+
+# Game roles — replace role_id with real Discord role IDs (Developer mode → copy ID)
+# Set role_id to 0 to skip a game until you add the ID.
+GAME_ROLES = [
+    {"label": "Free Fire", "role_id": 1518285374068232273, "emoji": "🔥", "description": "Click to select Free Fire"},
+    {"label": "Rust", "role_id": 1518285498903166986, "emoji": "🛠️", "description": "Click to select Rust"},
+    {"label": "Call of duty", "role_id": 1518285558089121842, "emoji": "🎯", "description": "Click to select Call of duty"},
+    {"label": "GTA V", "role_id": 1518285631657082932, "emoji": "🚗", "description": "Click to select GTA V"},
+    {"label": "Brawlhalla", "role_id": 1518286791382274211, "emoji": "⚔️", "description": "Click to select Brawlhalla"},
+    {"label": "CS GO", "role_id": 1518286667360763914, "emoji": "💣", "description": "Click to select CS GO"},
+    {"label": "Fortnite", "role_id": 1518286698277240912, "emoji": "🏝️", "description": "Click to select Fortnite"},
+    {"label": "Valorant", "role_id": 1518270987882201168, "emoji": "🎮", "description": "Click to select Valorant"},
+    {"label": "League of Legends", "role_id": 1518285800201257031, "emoji": "🧙", "description": "Click to select League of Legends"},
+    {"label": "Minecraft", "role_id": 1518285836532056286, "emoji": "⛏️", "description": "Click to select Minecraft"},
+]
+
+
+def _active_game_roles():
+    return [g for g in GAME_ROLES if g.get("role_id", 0)]
+
+
+class GameRoleSelect(discord.ui.Select):
+    def __init__(self):
+        active = _active_game_roles()
+        if not active:
+            options = [
+                discord.SelectOption(
+                    label="No roles configured",
+                    value="none",
+                    description="Admin: set role_id in GAME_ROLES",
+                    emoji="⚠️",
+                )
+            ]
+            super().__init__(
+                placeholder="Select your roles",
+                min_values=0,
+                max_values=1,
+                options=options,
+                custom_id="legends_game_role_picker",
+                disabled=True,
+            )
+            return
+
+        options = [
+            discord.SelectOption(
+                label=g["label"],
+                value=str(g["role_id"]),
+                description=g.get("description", f"Get the {g['label']} role"),
+                emoji=g.get("emoji"),
+            )
+            for g in active[:25]
+        ]
+        super().__init__(
+            placeholder="Select your roles",
+            min_values=0,
+            max_values=len(options),
+            options=options,
+            custom_id="legends_game_role_picker",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values == ["none"]:
+            return await interaction.response.send_message("Roles not configured yet.", ephemeral=True)
+
+        member = interaction.user
+        guild = interaction.guild
+        all_game_ids = {g["role_id"] for g in _active_game_roles()}
+        selected_ids = {int(v) for v in self.values}
+
+        to_remove = []
+        to_add = []
+        for rid in all_game_ids:
+            role = guild.get_role(rid)
+            if not role:
+                continue
+            has = role in member.roles
+            want = rid in selected_ids
+            if has and not want:
+                to_remove.append(role)
+            elif want and not has:
+                to_add.append(role)
+
+        try:
+            if to_remove:
+                await member.remove_roles(*to_remove, reason="Game role picker")
+            if to_add:
+                await member.add_roles(*to_add, reason="Game role picker")
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "I cannot assign these roles. Move my bot role **above** the game roles.",
+                ephemeral=True,
+            )
+
+        if selected_ids:
+            names = ", ".join(f"**{guild.get_role(rid).name}**" for rid in selected_ids if guild.get_role(rid))
+            msg = f"Roles updated: {names}"
+        else:
+            msg = "All game roles removed."
+
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+class GameRolePickerView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(GameRoleSelect())
+
+
+class DummyVoiceClient(discord.VoiceProtocol):
+    def __init__(self, client, channel):
+        self.client = client
+        self.channel = channel
+        self._connected = False
+
+    async def connect(self, *, timeout: float, reconnect: bool, self_deaf: bool = True, self_mute: bool = True) -> None:
+        await self.channel.guild.change_voice_state(channel=self.channel, self_deaf=self_deaf, self_mute=self_mute)
+        self._connected = True
+
+    async def disconnect(self, *, force: bool = False) -> None:
+        await self.channel.guild.change_voice_state(channel=None)
+        self._connected = False
+        try:
+            key_id, _ = self.channel._get_voice_client_key()
+            self.client._connection._remove_voice_client(key_id)
+        except Exception:
+            pass
+
+    async def on_voice_state_update(self, data):
+        pass
+
+    async def on_voice_server_update(self, data):
+        pass
+
+    def is_connected(self):
+        return self._connected
+
+    def is_playing(self):
+        return False
+
+    def stop(self):
+        pass
+
+
+async def load_database_from_discord():
+    global user_levels
+    await bot.wait_until_ready()
+    channel = bot.get_channel(DATA_BACKUP_CHANNEL_ID)
+
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                user_levels = {int(k): v for k, v in data.items()}
+                print("Loaded from local JSON file.")
+                return
+        except Exception:
+            pass
+
+    if channel:
+        try:
+            async for message in channel.history(limit=5):
+                if message.author == bot.user and message.content.startswith("```json"):
+                    clean_content = message.content.strip("```json").strip("```")
+                    data = json.loads(clean_content)
+                    user_levels = {int(k): v for k, v in data.items()}
+                    print("Restored levels from Discord backup channel.")
+                    with open(DB_FILE, "w", encoding="utf-8") as f:
+                        json.dump(user_levels, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"Error loading cloud db: {e}")
+
+
+async def save_database_to_discord():
+    if not user_levels:
+        return
+    try:
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(user_levels, f, ensure_ascii=False, indent=4)
+
+        channel = bot.get_channel(DATA_BACKUP_CHANNEL_ID)
+        if channel:
+            try:
+                await channel.purge(limit=10, check=lambda m: m.author == bot.user)
+            except Exception:
+                pass
+
+            formatted_data = {str(k): v for k, v in user_levels.items()}
+            json_string = json.dumps(formatted_data, ensure_ascii=False, indent=2)
+
+            await channel.send(
+                content=f"```json\n{json_string}\n```",
+                embed=discord.Embed(
+                    title="AUTOMATIC DATA BACKUP SECURED",
+                    description="Automated backup for server voice levels.\n**DO NOT DELETE THIS MESSAGE.**",
+                    color=discord.Color.green(),
+                ),
+            )
+    except Exception as e:
+        print(f"Cloud backup failed: {e}")
+
+
+class KickUserSelect(discord.ui.Select):
+    def __init__(self, channel):
+        self.channel = channel
+        options = [
+            discord.SelectOption(label=member.display_name, value=str(member.id), emoji="👤")
+            for member in channel.members
+            if not member.bot
+        ]
+        if not options:
+            options = [discord.SelectOption(label="No other members inside the room", value="none", disabled=True)]
+
+        super().__init__(placeholder="Select a member to kick out...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            return await interaction.response.send_message("There is no one here to kick!", ephemeral=True)
+
+        member_id = int(self.values[0])
+        member = interaction.guild.get_member(member_id)
+
+        if member and member.voice and member.voice.channel.id == self.channel.id:
+            await member.move_to(None)
+            await interaction.response.send_message(f"**{member.display_name}** has been kicked.", ephemeral=True)
+        else:
+            await interaction.response.send_message("User is no longer in your room.", ephemeral=True)
+
+
+class KickView(discord.ui.View):
+    def __init__(self, channel):
+        super().__init__(timeout=60)
+        self.add_item(KickUserSelect(channel))
+
+
+class RenameModal(discord.ui.Modal, title="Change Room Name"):
+    channel_name = discord.ui.TextInput(label="New Room Name", placeholder="Enter channel name...", max_length=30, required=True)
+
+    def __init__(self, channel):
+        super().__init__()
+        self.channel = channel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.channel.edit(name=self.channel_name.value)
+        await interaction.response.send_message(f"Room name updated to: **{self.channel_name.value}**", ephemeral=True)
+
+
+class ControlPanelView(discord.ui.View):
+    def __init__(self, channel):
+        super().__init__(timeout=None)
+        self.channel = channel
+
+    @discord.ui.button(label="Lock Room", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="lock_room")
+    async def lock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != owners.get(self.channel.id):
+            return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
+
+        boy_role = interaction.guild.get_role(BOY_ROLE_ID)
+        girl_role = interaction.guild.get_role(GIRL_ROLE_ID)
+        if boy_role:
+            await self.channel.set_permissions(boy_role, connect=False)
+        if girl_role:
+            await self.channel.set_permissions(girl_role, connect=False)
+        await interaction.response.send_message("Room locked.", ephemeral=True)
+
+    @discord.ui.button(label="Unlock Room", style=discord.ButtonStyle.success, emoji="🔓", custom_id="unlock_room")
+    async def unlock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != owners.get(self.channel.id):
+            return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
+
+        boy_role = interaction.guild.get_role(BOY_ROLE_ID)
+        girl_role = interaction.guild.get_role(GIRL_ROLE_ID)
+        if boy_role:
+            await self.channel.set_permissions(boy_role, connect=True, view_channel=True, speak=True)
+        if girl_role:
+            await self.channel.set_permissions(girl_role, connect=True, view_channel=True, speak=True)
+        await interaction.response.send_message("Room unlocked.", ephemeral=True)
+
+    @discord.ui.button(label="Rename", style=discord.ButtonStyle.primary, emoji="📝", custom_id="rename_room")
+    async def rename_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != owners.get(self.channel.id):
+            return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
+        await interaction.response.send_modal(RenameModal(self.channel))
+
+    @discord.ui.button(label="Kick Member", style=discord.ButtonStyle.secondary, emoji="👞", custom_id="kick_member")
+    async def kick_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != owners.get(self.channel.id):
+            return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
+        await interaction.response.send_message("Choose who to disconnect:", view=KickView(self.channel), ephemeral=True)
+
+    @discord.ui.button(label="Check Level", style=discord.ButtonStyle.primary, emoji="📊", custom_id="check_my_level")
+    async def check_level_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_data = user_levels.get(interaction.user.id, {"xp": 0, "level": 0})
+        embed_stats = discord.Embed(
+            title="YOUR LIVE STATS",
+            description=(
+                f"Hello {interaction.user.mention}!\n\n"
+                f"• **Current Level:** `Level {user_data['level']}`\n"
+                f"• **Total Experience:** `{user_data['xp']} XP`"
+            ),
+            color=discord.Color.blue(),
+        )
+        embed_stats.set_thumbnail(url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=embed_stats, ephemeral=True)
+
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+
+    await load_database_from_discord()
+
+    voice_channel = bot.get_channel(BOT_VOICE_CHANNEL_ID)
+    if voice_channel:
+        try:
+            await voice_channel.connect(cls=DummyVoiceClient)
+            print(f"Bot connected to voice lounge: {voice_channel.name}")
+        except Exception as e:
+            print(f"Failed to join static channel: {e}")
+
+    update_levels_task.start()
+    bot.add_view(GameRolePickerView())
+    print("System online.")
+
+
+@tasks.loop(minutes=1.0)
+async def update_levels_task():
+    data_changed = False
+    for guild in bot.guilds:
+        log_channel = guild.get_channel(LEVEL_LOG_CHANNEL_ID)
+        for voice_channel in guild.voice_channels:
+            if voice_channel.id in [
+                CREATE_CHANNEL_ID,
+                SUPPORT_CHANNEL_ID,
+                VERIFICATION_1_ID,
+                VERIFICATION_2_ID,
+                BOT_VOICE_CHANNEL_ID,
+            ] or len(voice_channel.members) == 0:
+                continue
+
+            for member in voice_channel.members:
+                if member.bot or member.voice.self_deaf:
+                    continue
+
+                user_id = member.id
+                if user_id not in user_levels:
+                    user_levels[user_id] = {"xp": 0, "level": 0}
+
+                user_levels[user_id]["xp"] += 10
+                new_calculated_level = user_levels[user_id]["xp"] // 150
+
+                if new_calculated_level > 1000:
+                    new_calculated_level = 1000
+
+                data_changed = True
+
+                if new_calculated_level > user_levels[user_id]["level"]:
+                    user_levels[user_id]["level"] = new_calculated_level
+                    current_lvl = user_levels[user_id]["level"]
+
+                    if log_channel:
+                        embed_lvl = discord.Embed(
+                            title="LEVEL UP!",
+                            description=(
+                                f"{member.mention} reached **Level {current_lvl}**.\n"
+                                f"*Total XP: {user_levels[user_id]['xp']}*"
+                            ),
+                            color=discord.Color.gold(),
+                        )
+                        embed_lvl.set_thumbnail(url=member.display_avatar.url)
+                        await log_channel.send(embed=embed_lvl)
+
+                    if current_lvl >= 10 and current_lvl < 20:
+                        role = guild.get_role(ROLE_LVL_10)
+                        if role and role not in member.roles:
+                            await member.add_roles(role)
+                    elif current_lvl >= 20 and current_lvl < 30:
+                        role = guild.get_role(ROLE_LVL_20)
+                        if role and role not in member.roles:
+                            await member.add_roles(role)
+                    elif current_lvl >= 30:
+                        role = guild.get_role(ROLE_LVL_30)
+                        if role and role not in member.roles:
+                            await member.add_roles(role)
+
+    if data_changed:
+        await save_database_to_discord()
+
+
+@bot.command(name="level")
+async def check_user_level_cmd(ctx, member: discord.Member = None):
+    target_member = member or ctx.author
+    if target_member.bot:
+        return await ctx.send("Bots do not have voice leveling profiles.")
+
+    user_data = user_levels.get(target_member.id, {"xp": 0, "level": 0})
+
+    embed_cmd = discord.Embed(
+        title="ARENA LEVEL REGISTRY",
+        description=(
+            f"Stats for: {target_member.mention}\n\n"
+            f"• **Current Level:** `Level {user_data['level']}`\n"
+            f"• **Experience Points:** `{user_data['xp']} XP`"
+        ),
+        color=discord.Color.from_rgb(46, 204, 113),
+    )
+    embed_cmd.set_thumbnail(url=target_member.display_avatar.url)
+    embed_cmd.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed_cmd)
+
+
+@bot.command(name="testwelcome")
+async def test_welcome_cmd(ctx, member: discord.Member = None):
+    """Preview welcome card without a new member joining."""
+    target = member or ctx.author
+    welcome_channel = ctx.guild.get_channel(WELCOME_CHANNEL_ID)
+    if not welcome_channel:
+        return await ctx.send("Welcome channel not found.")
+
+    try:
+        buffer = await build_welcome_card(target)
+        image_file = discord.File(buffer, filename="welcome_card.png")
+        embed = discord.Embed(
+            title="GLORIOUS ARRIVAL! (TEST)",
+            description=(
+                f"Preview for {target.mention}\n\n"
+                f"Config: size={AVATAR_SIZE[0]} pos={AVATAR_POSITION} font={FONT_SIZE}"
+            ),
+            color=discord.Color.from_rgb(231, 76, 60),
+        )
+        embed.set_image(url="attachment://welcome_card.png")
+        await welcome_channel.send(content=f"Welcome test for {target.mention}", file=image_file, embed=embed)
+        await ctx.send("Welcome preview sent.", delete_after=5)
+    except Exception as e:
+        await ctx.send(f"Welcome test failed: {e}")
+
+
+@bot.command(name="postroles")
+@commands.has_permissions(manage_guild=True)
+async def post_roles_cmd(ctx):
+    """Post the game role picker menu (admin only)."""
+    active = _active_game_roles()
+    if not active:
+        return await ctx.send(
+            "No game roles configured. Edit **GAME_ROLES** in `bot.py` and set real `role_id` values."
+        )
+
+    lines = "\n".join(f"{g.get('emoji', '🎮')} @{g['label']}" for g in active)
+    embed = discord.Embed(
+        title="Select your roles",
+        description=(
+            "Choose your games below. The bot will assign the matching roles automatically.\n\n"
+            f"{lines}\n\n"
+            "You can select **multiple** games at once."
+        ),
+        color=discord.Color.purple(),
+    )
+    await ctx.send(embed=embed, view=GameRolePickerView())
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.event
+async def on_member_join(member):
+    guild = member.guild
+    welcome_channel = guild.get_channel(WELCOME_CHANNEL_ID)
+
+    not_verified_role = guild.get_role(NOT_VERIFIED_ROLE_ID)
+    if not_verified_role:
+        try:
+            await member.add_roles(not_verified_role)
+            print(f"Given Not Verified role to {member.name}")
+        except Exception as e:
+            print(f"Failed to give role: {e}")
+
+    if not welcome_channel:
+        return
+
+    try:
+        buffer = await build_welcome_card(member)
+        image_file = discord.File(buffer, filename="welcome_card.png")
+
+        embed_welcome = discord.Embed(
+            title="GLORIOUS ARRIVAL!",
+            description=(
+                f"Welcome {member.mention} to **{guild.name}**!\n"
+                f"Enjoy your stay here!\n\n"
+                f"• **Member Name:** {member.name}\n"
+                f"• **Registry Account:** #{guild.member_count}\n\n"
+                f"Please head over to the verification rooms to confirm your account."
+            ),
+            color=discord.Color.from_rgb(231, 76, 60),
+        )
+        embed_welcome.set_image(url="attachment://welcome_card.png")
+
+        content_msg = f"Welcome {member.mention}! The glamorous combatant has landed in **{guild.name}**!"
+        await welcome_channel.send(content=content_msg, file=image_file, embed=embed_welcome)
+
+    except Exception as e:
+        print(f"Error generating welcome image: {e}")
+        embed_fallback = discord.Embed(
+            title="GLORIOUS ARRIVAL!",
+            description=(
+                f"Welcome {member.mention} to **{guild.name}**!\n\n"
+                f"• **Member Name:** {member.name}\n"
+                f"• **Registry Account:** #{guild.member_count}"
+            ),
+            color=discord.Color.from_rgb(231, 76, 60),
+        )
+        await welcome_channel.send(content=f"Welcome {member.mention}!", embed=embed_fallback)
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    guild = member.guild
+
+    verification_hubs = {VERIFICATION_1_ID, VERIFICATION_2_ID}
+
+    if after.channel and after.channel.id == SUPPORT_CHANNEL_ID:
+        if before.channel is None or before.channel.id != after.channel.id:
+            if not _member_has_any_role(member, SUPPORT_NOTIFY_ROLE_IDS):
+                embed_alert = discord.Embed(
+                    title="SUPPORT — NEW USER WAITING",
+                    description=(
+                        f"**User:** {member.mention} (`{member.name}`)\n"
+                        f"**Room:** {after.channel.name}\n\n"
+                        "A member joined Support. Please check their sub-room."
+                    ),
+                    color=discord.Color.orange(),
+                )
+                await _notify_roles_members(guild, STAFF_ROLE_IDS, embed_alert)
+
+    if after.channel and after.channel.id in verification_hubs:
+        if before.channel is None or before.channel.id != after.channel.id:
+            has_not_verified_role = any(role.id == NOT_VERIFIED_ROLE_ID for role in member.roles)
+            if has_not_verified_role:
+                staff_role = guild.get_role(STAFF_ROLE_ID)
+                if staff_role:
+                    embed_alert = discord.Embed(
+                        title="UNVERIFIED USER DETECTED IN VOICE",
+                        description=f"**User:** {member.mention}\n**Room:** {after.channel.name}",
+                        color=discord.Color.red(),
+                    )
+                    for staff_member in staff_role.members:
+                        if not staff_member.bot:
+                            try:
+                                await staff_member.send(embed=embed_alert)
+                            except discord.Forbidden:
+                                pass
+
+    if after.channel and after.channel.id in JOIN_TO_CREATE_CHANNELS:
+        await _create_join_to_create_room(member, after.channel)
+
+    if before.channel and before.channel.id in owners and len(before.channel.members) == 0:
+        owners.pop(before.channel.id)
+        await before.channel.delete()
+
+
+bot.run(TOKEN)
