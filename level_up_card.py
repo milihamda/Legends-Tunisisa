@@ -170,7 +170,7 @@ async def build_level_up_card(member, old_level: int, new_level: int, background
     name = member.display_name
     if len(name) > 18:
         name = name[:16] + "…"
-    name_font = _load_font(40)
+    name_font = _load_font(50)
     draw.text((150, CARD_SIZE[1] // 2), name, font=name_font, fill=WHITE, anchor="lm")
 
     old_x = CARD_SIZE[0] - 230
