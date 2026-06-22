@@ -832,11 +832,17 @@ async def on_voice_state_update(member, before, after):
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def _send_ok(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
+
+    def do_GET(self):
+        self._send_ok()
         self.wfile.write(b"Legends Tunisia bot is running")
+
+    def do_HEAD(self):
+        self._send_ok()
 
     def log_message(self, format, *args):
         pass
