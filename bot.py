@@ -41,7 +41,6 @@ SUPPORT_NOTIFY_ROLE_IDS = [
     1517586424306598140,
 ]
 
-BOT_CHAT_CHANNEL_ID = 1518023858765168771
 # Support: DM sent to members who have these roles when a normal user joins
 STAFF_ROLE_IDS = [
     STAFF_ROLE_ID,
@@ -53,7 +52,8 @@ LEVEL_LOG_CHANNEL_ID = 1517921554510385242
 
 DATA_BACKUP_CHANNEL_ID = 1518023858765168771
 BOT_VOICE_CHANNEL_ID = 1518025649225470072
-BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "0"))  # or channel named bot-chat
+BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"))
+BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "welcome to Bot-Chat")
 
 ROLE_LVL_10 = 1518012453001232526
 ROLE_LVL_20 = 1518012596824047677
@@ -72,7 +72,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 owners = {}
 user_levels = {}
 DB_FILE = "levels_database.json"
-active_stats_messages = {}
+bot_chat_messages = {}
 
 JOIN_TO_CREATE_CHANNELS = {
     CREATE_CHANNEL_ID: {
@@ -194,52 +194,23 @@ def _get_bot_chat_channel(guild):
     return discord.utils.get(guild.text_channels, name="bot-chat")
 
 
-def _count_server_stats(guild):
-    humans = [m for m in guild.members if not m.bot]
-    online = sum(1 for m in humans if m.status != discord.Status.offline)
-    in_voice = sum(1 for m in humans if m.voice and m.voice.channel)
-    return {
-        "total": len(humans),
-        "online": online,
-        "in_voice": in_voice,
-    }
-
-
-async def _update_active_stats_display(guild):
+async def _refresh_bot_chat_welcome_message(guild):
     channel = _get_bot_chat_channel(guild)
     if not channel:
         return
 
-    stats = _count_server_stats(guild)
-    embed = discord.Embed(
-        title="LEGENDS TUNISIA — LIVE STATS",
-        description="Updated every 30 seconds",
-        color=discord.Color.green(),
-    )
-    embed.add_field(name="Members", value=f"`{stats['total']}`", inline=True)
-    embed.add_field(name="Online", value=f"`{stats['online']}`", inline=True)
-    embed.add_field(name="In voice", value=f"`{stats['in_voice']}`", inline=True)
-    embed.set_footer(text=f"Server: {guild.name}")
-
-    message_id = active_stats_messages.get(guild.id)
+    message_id = bot_chat_messages.get(guild.id)
     if message_id:
         try:
-            message = await channel.fetch_message(message_id)
-            await message.edit(embed=embed)
-            return
+            old_message = await channel.fetch_message(message_id)
+            await old_message.delete()
         except (discord.NotFound, discord.Forbidden):
-            active_stats_messages.pop(guild.id, None)
+            pass
+        finally:
+            bot_chat_messages.pop(guild.id, None)
 
-    async for message in channel.history(limit=20):
-        if message.author == bot.user and message.embeds:
-            title = message.embeds[0].title or ""
-            if "LIVE STATS" in title:
-                await message.edit(embed=embed)
-                active_stats_messages[guild.id] = message.id
-                return
-
-    message = await channel.send(embed=embed)
-    active_stats_messages[guild.id] = message.id
+    message = await channel.send(BOT_CHAT_MESSAGE)
+    bot_chat_messages[guild.id] = message.id
 
 # Game roles — replace role_id with real Discord role IDs (Developer mode → copy ID)
 # Set role_id to 0 to skip a game until you add the ID.
@@ -560,30 +531,30 @@ async def on_ready():
             print(f"Failed to join static channel: {e}")
 
     update_levels_task.start()
-    update_active_stats_task.start()
+    bot_chat_keepalive_task.start()
     bot.add_view(GameRolePickerView())
 
     for guild in bot.guilds:
         try:
             await guild.chunk()
-            await _update_active_stats_display(guild)
+            await _refresh_bot_chat_welcome_message(guild)
         except Exception as e:
-            print(f"Active stats init failed for {guild.name}: {e}")
+            print(f"Bot chat keepalive init failed for {guild.name}: {e}")
 
     print("System online.")
 
 
-@tasks.loop(seconds=30.0)
-async def update_active_stats_task():
+@tasks.loop(minutes=1.0)
+async def bot_chat_keepalive_task():
     for guild in bot.guilds:
         try:
-            await _update_active_stats_display(guild)
+            await _refresh_bot_chat_welcome_message(guild)
         except Exception as e:
-            print(f"Active stats update failed for {guild.name}: {e}")
+            print(f"Bot chat keepalive failed for {guild.name}: {e}")
 
 
-@update_active_stats_task.before_loop
-async def before_active_stats_task():
+@bot_chat_keepalive_task.before_loop
+async def before_bot_chat_keepalive_task():
     await bot.wait_until_ready()
 
 
