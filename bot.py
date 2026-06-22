@@ -55,6 +55,11 @@ BOT_VOICE_CHANNEL_ID = 1518025649225470072
 BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"))
 BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "welcome to Bot-Chat")
 
+# Server default: chat/voice-text notifications only on @mentions (not every message)
+SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS = os.getenv(
+    "SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS", "true"
+).lower() in ("1", "true", "yes")
+
 ROLE_LVL_10 = 1518012453001232526
 ROLE_LVL_20 = 1518012596824047677
 ROLE_LVL_30 = 1518012707553546421
@@ -192,6 +197,30 @@ def _get_bot_chat_channel(guild):
         if channel:
             return channel
     return discord.utils.get(guild.text_channels, name="bot-chat")
+
+
+async def _apply_guild_notification_settings(guild, *, force=False):
+    """Set guild default notifications to @mentions only (Manage Server required)."""
+    if not SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS and not force:
+        return False, "Auto setup is off. Use `!setnotifications` or enable `SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS`."
+
+    if guild.default_notifications == discord.NotificationLevel.only_mentions:
+        return True, "Server notifications are already set to **@mentions only**."
+
+    if not guild.me.guild_permissions.manage_guild:
+        return False, "I need **Manage Server** permission to change this setting."
+
+    try:
+        await guild.edit(
+            default_notifications=discord.NotificationLevel.only_mentions,
+            reason="Legends bot: default chat notifications to @mentions only",
+        )
+        print(f"Set {guild.name} default notifications to @mentions only")
+        return True, "Server default notifications updated to **@mentions only**."
+    except discord.Forbidden:
+        return False, "I cannot edit server settings (missing permission)."
+    except discord.HTTPException as exc:
+        return False, f"Discord API error: {exc.text}"
 
 
 async def _refresh_bot_chat_welcome_message(guild):
@@ -537,9 +566,14 @@ async def on_ready():
     for guild in bot.guilds:
         try:
             await guild.chunk()
+            success, message = await _apply_guild_notification_settings(guild)
+            if success and "updated" in message.lower():
+                print(message)
+            elif not success and SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS:
+                print(f"{guild.name}: {message}")
             await _refresh_bot_chat_welcome_message(guild)
         except Exception as e:
-            print(f"Bot chat keepalive init failed for {guild.name}: {e}")
+            print(f"Guild init failed for {guild.name}: {e}")
 
     print("System online.")
 
@@ -706,6 +740,20 @@ async def test_welcome_cmd(ctx, member: discord.Member = None):
         await ctx.send("Welcome preview sent.", delete_after=5)
     except Exception as e:
         await ctx.send(f"Welcome test failed: {e}")
+
+
+@bot.command(name="setnotifications", aliases=["mentionsonly", "notifmentions"])
+@commands.has_permissions(manage_guild=True)
+async def set_notifications_cmd(ctx):
+    """Set server default notifications to @mentions only (admin)."""
+    success, message = await _apply_guild_notification_settings(ctx.guild, force=True)
+    color = discord.Color.green() if success else discord.Color.red()
+    embed = discord.Embed(title="Notification Settings", description=message, color=color)
+    await ctx.send(embed=embed)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
 
 
 @bot.command(name="postroles")
