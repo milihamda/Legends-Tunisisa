@@ -77,6 +77,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 owners = {}
 room_kinds = {}
 locked_rooms = set()
+locked_room_members = {}
 user_levels = {}
 DB_FILE = "levels_database.json"
 bot_chat_messages = {}
@@ -192,12 +193,14 @@ async def _create_join_to_create_room(member, trigger_channel):
 
 
 async def _set_room_locked(channel, *, locked: bool):
-    """Lock via user limit — room stays visible, new joins blocked (Discord standard)."""
+    """Lock = whitelist current members + block everyone else from joining."""
     if locked:
-        limit = max(len(channel.members), 1)
-        await channel.edit(user_limit=limit)
+        allowed = {m.id for m in channel.members if not m.bot}
+        locked_room_members[channel.id] = allowed
+        await channel.edit(user_limit=max(len(allowed), 1))
         locked_rooms.add(channel.id)
     else:
+        locked_room_members.pop(channel.id, None)
         await channel.edit(user_limit=0)
         locked_rooms.discard(channel.id)
         await _restore_room_join_permissions(channel, channel.guild)
@@ -637,8 +640,10 @@ class ControlPanelView(discord.ui.View):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
         await _set_room_locked(channel, locked=True)
+        count = len(locked_room_members.get(channel.id, set()))
         await interaction.response.send_message(
-            "Room locked — others can **see** it but cannot join (channel full).",
+            f"Room locked — only the **{count}** people here can stay. "
+            "If someone leaves, no one can take their place until you unlock.",
             ephemeral=True,
         )
 
@@ -1027,6 +1032,15 @@ async def on_member_join(member):
 async def on_voice_state_update(member, before, after):
     guild = member.guild
 
+    if after.channel and after.channel.id in locked_rooms and not member.bot:
+        allowed = locked_room_members.get(after.channel.id, set())
+        if member.id not in allowed:
+            try:
+                await member.move_to(None)
+            except discord.HTTPException:
+                pass
+            return
+
     verification_hubs = {VERIFICATION_1_ID, VERIFICATION_2_ID}
 
     if after.channel and after.channel.id == SUPPORT_CHANNEL_ID:
@@ -1064,10 +1078,20 @@ async def on_voice_state_update(member, before, after):
     if after.channel and after.channel.id in JOIN_TO_CREATE_CHANNELS:
         await _create_join_to_create_room(member, after.channel)
 
+    if before.channel and before.channel.id in locked_rooms:
+        allowed = locked_room_members.get(before.channel.id)
+        if allowed is not None:
+            allowed.discard(member.id)
+        try:
+            await before.channel.edit(user_limit=max(len(before.channel.members), 1))
+        except discord.HTTPException:
+            pass
+
     if before.channel and before.channel.id in owners and len(before.channel.members) == 0:
         owners.pop(before.channel.id, None)
         room_kinds.pop(before.channel.id, None)
         locked_rooms.discard(before.channel.id)
+        locked_room_members.pop(before.channel.id, None)
         await before.channel.delete()
 
 
