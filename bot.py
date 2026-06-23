@@ -167,7 +167,7 @@ async def _create_join_to_create_room(member, trigger_channel):
             value="Please wait — a staff member will join to verify you.",
             inline=False,
         )
-    await new_channel.send(embed=embed, view=ControlPanelView(new_channel))
+    await new_channel.send(embed=embed, view=ControlPanelView(new_channel), suppress=True)
 
 
 async def _notify_roles_members(guild, role_ids, embed):
@@ -231,14 +231,14 @@ async def _refresh_bot_chat_welcome_message(guild):
     message_id = bot_chat_messages.get(guild.id)
     if message_id:
         try:
-            old_message = await channel.fetch_message(message_id)
-            await old_message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
-        finally:
+            await channel.fetch_message(message_id)
+            return
+        except discord.NotFound:
             bot_chat_messages.pop(guild.id, None)
+        except discord.Forbidden:
+            return
 
-    message = await channel.send(BOT_CHAT_MESSAGE)
+    message = await channel.send(BOT_CHAT_MESSAGE, suppress=True)
     bot_chat_messages[guild.id] = message.id
 
 # Game roles — replace role_id with real Discord role IDs (Developer mode → copy ID)
@@ -749,6 +749,16 @@ async def set_notifications_cmd(ctx):
     success, message = await _apply_guild_notification_settings(ctx.guild, force=True)
     color = discord.Color.green() if success else discord.Color.red()
     embed = discord.Embed(title="Notification Settings", description=message, color=color)
+    embed.add_field(
+        name="Important",
+        value=(
+            "This sets the **server default** for new members only.\n"
+            "Existing members must set manually:\n"
+            "• Server name → **Notification Settings** → **Only @mentions**\n"
+            "• Or right-click a voice/text channel → **Notification Settings** → **Only @mentions**"
+        ),
+        inline=False,
+    )
     await ctx.send(embed=embed)
     try:
         await ctx.message.delete()

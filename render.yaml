@@ -3,7 +3,7 @@ services:
     name: legends-tunisia-bot
     runtime: docker
     plan: free
-    branch: first_commit
+    branch: main
     healthCheckPath: /
     envVars:
       - key: DISCORD_TOKEN
