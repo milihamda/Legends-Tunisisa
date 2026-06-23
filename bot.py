@@ -81,6 +81,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 owners = {}
 room_kinds = {}
+locked_rooms = set()
 user_levels = {}
 DB_FILE = "levels_database.json"
 bot_chat_messages = {}
@@ -195,6 +196,34 @@ async def _create_join_to_create_room(member, trigger_channel):
             inline=False,
         )
     await _send_room_control_panel(new_channel, member, embed)
+
+
+async def _set_room_locked(channel, *, locked: bool):
+    """Lock via user limit — room stays visible, new joins blocked (Discord standard)."""
+    if locked:
+        limit = max(len(channel.members), 1)
+        await channel.edit(user_limit=limit)
+        locked_rooms.add(channel.id)
+    else:
+        await channel.edit(user_limit=0)
+        locked_rooms.discard(channel.id)
+        await _restore_room_join_permissions(channel, channel.guild)
+
+
+def _lounge_access_roles(guild):
+    return [r for rid in (BOY_ROLE_ID, GIRL_ROLE_ID) if (r := guild.get_role(rid))]
+
+
+async def _restore_room_join_permissions(channel, guild):
+    """Fix Boy/Girl perms after old permission-based lock hid the room."""
+    for role in _lounge_access_roles(guild):
+        await channel.set_permissions(
+            role,
+            view_channel=True,
+            connect=True,
+            speak=True,
+            send_messages=True,
+        )
 
 
 async def _send_room_control_panel(channel, owner, embed):
@@ -677,13 +706,11 @@ class ControlPanelView(discord.ui.View):
         if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
-        boy_role = interaction.guild.get_role(BOY_ROLE_ID)
-        girl_role = interaction.guild.get_role(GIRL_ROLE_ID)
-        if boy_role:
-            await channel.set_permissions(boy_role, connect=False)
-        if girl_role:
-            await channel.set_permissions(girl_role, connect=False)
-        await interaction.response.send_message("Room locked.", ephemeral=True)
+        await _set_room_locked(channel, locked=True)
+        await interaction.response.send_message(
+            "Room locked — others can **see** it but cannot join (channel full).",
+            ephemeral=True,
+        )
 
     async def unlock_button(self, interaction: discord.Interaction):
         channel = self._get_channel(interaction)
@@ -692,13 +719,8 @@ class ControlPanelView(discord.ui.View):
         if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
-        boy_role = interaction.guild.get_role(BOY_ROLE_ID)
-        girl_role = interaction.guild.get_role(GIRL_ROLE_ID)
-        if boy_role:
-            await channel.set_permissions(boy_role, connect=True, view_channel=True, speak=True)
-        if girl_role:
-            await channel.set_permissions(girl_role, connect=True, view_channel=True, speak=True)
-        await interaction.response.send_message("Room unlocked.", ephemeral=True)
+        await _set_room_locked(channel, locked=False)
+        await interaction.response.send_message("Room unlocked — others can join again.", ephemeral=True)
 
     async def rename_button(self, interaction: discord.Interaction):
         channel = self._get_channel(interaction)
@@ -1116,6 +1138,7 @@ async def on_voice_state_update(member, before, after):
     if before.channel and before.channel.id in owners and len(before.channel.members) == 0:
         owners.pop(before.channel.id, None)
         room_kinds.pop(before.channel.id, None)
+        locked_rooms.discard(before.channel.id)
         lounge_relay_webhooks.pop(before.channel.id, None)
         await before.channel.delete()
 
