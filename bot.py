@@ -60,11 +60,6 @@ SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS = os.getenv(
     "SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS", "true"
 ).lower() in ("1", "true", "yes")
 
-# Lounge voice-text: re-post messages without @mention as silent (no push notification)
-SILENT_LOUNGE_CHAT_UNLESS_MENTION = os.getenv(
-    "SILENT_LOUNGE_CHAT_UNLESS_MENTION", "true"
-).lower() in ("1", "true", "yes")
-
 ROLE_LVL_10 = 1518012453001232526
 ROLE_LVL_20 = 1518012596824047677
 ROLE_LVL_30 = 1518012707553546421
@@ -85,7 +80,6 @@ locked_rooms = set()
 user_levels = {}
 DB_FILE = "levels_database.json"
 bot_chat_messages = {}
-lounge_relay_webhooks = {}
 
 JOIN_TO_CREATE_CHANNELS = {
     CREATE_CHANNEL_ID: {
@@ -161,7 +155,6 @@ async def _create_join_to_create_room(member, trigger_channel):
             connect=True,
             send_messages=True,
             manage_channels=True,
-            manage_webhooks=True,
             read_message_history=True,
         )
 
@@ -327,69 +320,6 @@ async def _refresh_bot_chat_welcome_message(guild):
 
     message = await channel.send(BOT_CHAT_MESSAGE, suppress=True)
     bot_chat_messages[guild.id] = message.id
-
-
-def _message_has_user_mention(message):
-    for user in message.mentions:
-        if user.id != message.author.id and not user.bot:
-            return True
-    return False
-
-
-async def _get_lounge_relay_webhook(channel):
-    cached = lounge_relay_webhooks.get(channel.id)
-    if cached:
-        return cached
-
-    webhooks = await channel.webhooks()
-    for webhook in webhooks:
-        if webhook.user and webhook.user.id == channel.guild.me.id and webhook.name == "Lounge Relay":
-            lounge_relay_webhooks[channel.id] = webhook
-            return webhook
-
-    webhook = await channel.create_webhook(name="Lounge Relay", reason="Silent lounge chat relay")
-    lounge_relay_webhooks[channel.id] = webhook
-    return webhook
-
-
-async def _relay_silent_lounge_message(message):
-    """Re-post lounge voice-text without @mention so Discord sends no push notification."""
-    if not SILENT_LOUNGE_CHAT_UNLESS_MENTION:
-        return False
-    if message.author.bot or not message.guild:
-        return False
-    if not isinstance(message.channel, discord.VoiceChannel):
-        return False
-    if room_kinds.get(message.channel.id) != "lounge":
-        return False
-    if message.content.startswith("!"):
-        return False
-    if _message_has_user_mention(message):
-        return False
-    if not message.content and not message.attachments and not message.stickers:
-        return False
-
-    me = message.guild.me
-    if not me.guild_permissions.manage_messages or not me.guild_permissions.manage_webhooks:
-        return False
-
-    try:
-        files = [await attachment.to_file() for attachment in message.attachments]
-        webhook = await _get_lounge_relay_webhook(message.channel)
-        await message.delete()
-        await webhook.send(
-            content=message.content or "\u200b",
-            username=message.author.display_name,
-            avatar_url=message.author.display_avatar.url,
-            files=files or None,
-            suppress=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-            wait=True,
-        )
-        return True
-    except (discord.Forbidden, discord.HTTPException) as exc:
-        print(f"Silent lounge relay failed in {message.channel.name}: {exc}")
-        return False
 
 
 def _register_existing_lounge_rooms(guild):
@@ -1005,8 +935,7 @@ async def set_notifications_cmd(ctx):
             "Server default = **new members only**.\n"
             "**You** must set manually on your Discord:\n"
             "• Server icon → **Notification Settings** → **Only @mentions**\n"
-            "• Right-click lounge category → **Notification Settings** → **Only @mentions**\n\n"
-            "Lounge rooms: messages **without @mention** are auto-silent (no push)."
+            "• Right-click lounge category → **Notification Settings** → **Only @mentions**"
         ),
         inline=False,
     )
@@ -1139,15 +1068,7 @@ async def on_voice_state_update(member, before, after):
         owners.pop(before.channel.id, None)
         room_kinds.pop(before.channel.id, None)
         locked_rooms.discard(before.channel.id)
-        lounge_relay_webhooks.pop(before.channel.id, None)
         await before.channel.delete()
-
-
-@bot.event
-async def on_message(message):
-    if await _relay_silent_lounge_message(message):
-        return
-    await bot.process_commands(message)
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
