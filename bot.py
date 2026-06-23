@@ -224,27 +224,7 @@ async def _create_join_to_create_room(member, trigger_channel):
     room_kinds[new_channel.id] = config["kind"]
     await member.move_to(new_channel)
 
-    user_data = _get_user_level_data(member.id)
-    embed = discord.Embed(
-        title=config["title"],
-        description=f"Welcome {member.mention}!",
-        color=discord.Color.from_rgb(114, 137, 218),
-    )
-    embed.add_field(name="Owner", value=member.mention, inline=True)
-    embed.add_field(name="Level", value=f"`Level {user_data['level']}`", inline=True)
-    if config["kind"] == "support":
-        embed.add_field(
-            name="Staff",
-            value="Staff members can join this room to help you.",
-            inline=False,
-        )
-    elif config["kind"] == "verification":
-        embed.add_field(
-            name="Staff",
-            value="Please wait — a staff member will join to verify you.",
-            inline=False,
-        )
-    await _send_room_control_panel(new_channel, member, embed)
+    await _send_room_control_panel(new_channel, member, kind=config["kind"])
 
 
 async def _set_room_locked(channel, *, locked: bool):
@@ -277,17 +257,43 @@ async def _restore_room_join_permissions(channel, guild):
         )
 
 
-async def _send_room_control_panel(channel, owner, embed):
+PANEL_EMOJI_LOCK = discord.PartialEmoji(name="50376", id=1518983212066668675)
+PANEL_EMOJI_UNLOCK = discord.PartialEmoji(name="50375", id=1518983208224559214)
+PANEL_EMOJI_RENAME = discord.PartialEmoji(name="50377", id=1518983214511820850)
+PANEL_EMOJI_KICK = discord.PartialEmoji(name="50378", id=1518983216575741292)
+PANEL_EMOJI_LEVEL = discord.PartialEmoji(name="50379", id=1518983219372884038)
+
+
+def _build_room_panel_embed(member, channel, kind="lounge"):
+    description = (
+        f"👑 • **Owner:** {member.mention}\n"
+        f"🔊 • **Channel:** {channel.mention}\n\n"
+        f"📋 • **Status:** Fully functional. Use the buttons below to manage your channel."
+    )
+    if kind == "support":
+        description += "\n\n🛡️ • **Staff:** Staff members can join this room to help you."
+    elif kind == "verification":
+        description += "\n\n🛡️ • **Staff:** Please wait — a staff member will join to verify you."
+
+    embed = discord.Embed(
+        title="➕ Temporary Voice Control Panel",
+        description=description,
+        color=discord.Color.red(),
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text=f"ID: {member.id} • Temp Voice System")
+    return embed
+
+
+async def _send_room_control_panel(channel, owner, embed=None, *, kind="lounge"):
     """Post control panel embed + buttons in the voice channel text chat."""
+    if embed is None:
+        embed = _build_room_panel_embed(owner, channel, kind)
     view = ControlPanelView(channel.id)
     bot.add_view(view)
 
     try:
-        await channel.send(
-            content=f"{owner.mention} — open **chat** in this voice channel to use the panel below.",
-            embed=embed,
-            view=view,
-        )
+        await channel.send(embed=embed, view=view)
     except discord.Forbidden:
         print(f"Cannot send control panel in {channel.name}: missing Send Messages permission")
         try:
@@ -654,36 +660,51 @@ class ControlPanelView(discord.ui.View):
         self.channel_id = channel_id
 
         lock_btn = discord.ui.Button(
-            label="Lock Room", style=discord.ButtonStyle.danger, emoji="🔒",
+            label="Lock",
+            style=discord.ButtonStyle.secondary,
+            emoji=PANEL_EMOJI_LOCK,
             custom_id=f"legends:lock:{channel_id}",
+            row=0,
         )
         lock_btn.callback = self.lock_button
         self.add_item(lock_btn)
 
         unlock_btn = discord.ui.Button(
-            label="Unlock Room", style=discord.ButtonStyle.success, emoji="🔓",
+            label="Unlock",
+            style=discord.ButtonStyle.secondary,
+            emoji=PANEL_EMOJI_UNLOCK,
             custom_id=f"legends:unlock:{channel_id}",
+            row=0,
         )
         unlock_btn.callback = self.unlock_button
         self.add_item(unlock_btn)
 
         rename_btn = discord.ui.Button(
-            label="Rename", style=discord.ButtonStyle.primary, emoji="📝",
+            label="Rename",
+            style=discord.ButtonStyle.secondary,
+            emoji=PANEL_EMOJI_RENAME,
             custom_id=f"legends:rename:{channel_id}",
+            row=0,
         )
         rename_btn.callback = self.rename_button
         self.add_item(rename_btn)
 
         kick_btn = discord.ui.Button(
-            label="Kick Member", style=discord.ButtonStyle.secondary, emoji="👞",
+            label="Kick",
+            style=discord.ButtonStyle.secondary,
+            emoji=PANEL_EMOJI_KICK,
             custom_id=f"legends:kick:{channel_id}",
+            row=1,
         )
         kick_btn.callback = self.kick_button
         self.add_item(kick_btn)
 
         level_btn = discord.ui.Button(
-            label="Check Level", style=discord.ButtonStyle.primary, emoji="📊",
+            label="Check Level",
+            style=discord.ButtonStyle.secondary,
+            emoji=PANEL_EMOJI_LEVEL,
             custom_id=f"legends:level:{channel_id}",
+            row=2,
         )
         level_btn.callback = self.check_level_button
         self.add_item(level_btn)
@@ -953,21 +974,7 @@ async def repost_panel_cmd(ctx):
     owners.setdefault(channel.id, ctx.author.id)
 
     config_kind = room_kinds.get(channel.id, "lounge")
-    titles = {
-        "lounge": "HUB CENTRAL INTERFACE",
-        "support": "SUPPORT ROOM",
-        "verification": "VERIFICATION ROOM",
-    }
-    user_data = _get_user_level_data(ctx.author.id)
-    embed = discord.Embed(
-        title=titles.get(config_kind, "ROOM CONTROL"),
-        description=f"Welcome {ctx.author.mention}!",
-        color=discord.Color.from_rgb(114, 137, 218),
-    )
-    embed.add_field(name="Owner", value=ctx.author.mention, inline=True)
-    embed.add_field(name="Level", value=f"`Level {user_data['level']}`", inline=True)
-
-    await _send_room_control_panel(channel, ctx.author, embed)
+    await _send_room_control_panel(channel, ctx.author, kind=config_kind)
     try:
         await ctx.message.delete()
     except discord.Forbidden:
