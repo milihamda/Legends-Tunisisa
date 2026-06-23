@@ -60,6 +60,11 @@ SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS = os.getenv(
     "SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS", "true"
 ).lower() in ("1", "true", "yes")
 
+# Lounge voice-text: re-post messages without @mention as silent (no push notification)
+SILENT_LOUNGE_CHAT_UNLESS_MENTION = os.getenv(
+    "SILENT_LOUNGE_CHAT_UNLESS_MENTION", "true"
+).lower() in ("1", "true", "yes")
+
 ROLE_LVL_10 = 1518012453001232526
 ROLE_LVL_20 = 1518012596824047677
 ROLE_LVL_30 = 1518012707553546421
@@ -75,9 +80,11 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 owners = {}
+room_kinds = {}
 user_levels = {}
 DB_FILE = "levels_database.json"
 bot_chat_messages = {}
+lounge_relay_webhooks = {}
 
 JOIN_TO_CREATE_CHANNELS = {
     CREATE_CHANNEL_ID: {
@@ -131,12 +138,31 @@ async def _create_join_to_create_room(member, trigger_channel):
             )
     elif config["kind"] in ("support", "verification") and staff_role:
         overwrites[staff_role] = discord.PermissionOverwrite(
-            view_channel=True, connect=True, speak=True, move_members=True
+            view_channel=True,
+            connect=True,
+            speak=True,
+            send_messages=True,
+            move_members=True,
         )
 
     overwrites[member] = discord.PermissionOverwrite(
-        view_channel=True, connect=True, speak=True, manage_channels=True
+        view_channel=True,
+        connect=True,
+        speak=True,
+        send_messages=True,
+        manage_channels=True,
     )
+
+    me = guild.me
+    if me:
+        overwrites[me] = discord.PermissionOverwrite(
+            view_channel=True,
+            connect=True,
+            send_messages=True,
+            manage_channels=True,
+            manage_webhooks=True,
+            read_message_history=True,
+        )
 
     channel_name = config["name"].format(member=member.name)
     new_channel = await guild.create_voice_channel(
@@ -145,6 +171,7 @@ async def _create_join_to_create_room(member, trigger_channel):
         overwrites=overwrites,
     )
     owners[new_channel.id] = member.id
+    room_kinds[new_channel.id] = config["kind"]
     await member.move_to(new_channel)
 
     user_data = user_levels.get(member.id, {"xp": 0, "level": 0})
@@ -167,7 +194,38 @@ async def _create_join_to_create_room(member, trigger_channel):
             value="Please wait — a staff member will join to verify you.",
             inline=False,
         )
-    await new_channel.send(embed=embed, view=ControlPanelView(new_channel), suppress=True)
+    await _send_room_control_panel(new_channel, member, embed)
+
+
+async def _send_room_control_panel(channel, owner, embed):
+    """Post control panel embed + buttons in the voice channel text chat."""
+    view = ControlPanelView(channel.id)
+    bot.add_view(view)
+
+    try:
+        await channel.send(
+            content=f"{owner.mention} — open **chat** in this voice channel to use the panel below.",
+            embed=embed,
+            view=view,
+        )
+    except discord.Forbidden:
+        print(f"Cannot send control panel in {channel.name}: missing Send Messages permission")
+        try:
+            await owner.send(
+                embed=discord.Embed(
+                    title="Room created",
+                    description=(
+                        f"Your room **{channel.name}** is ready, but I could not post the control panel.\n"
+                        "Move my bot role **above** other roles and give **Send Messages** in voice channels.\n"
+                        "Then use `!panel` inside the room chat to repost it."
+                    ),
+                    color=discord.Color.orange(),
+                )
+            )
+        except discord.Forbidden:
+            pass
+    except discord.HTTPException as exc:
+        print(f"Control panel send failed in {channel.name}: {exc.text}")
 
 
 async def _notify_roles_members(guild, role_ids, embed):
@@ -240,6 +298,89 @@ async def _refresh_bot_chat_welcome_message(guild):
 
     message = await channel.send(BOT_CHAT_MESSAGE, suppress=True)
     bot_chat_messages[guild.id] = message.id
+
+
+def _message_has_user_mention(message):
+    for user in message.mentions:
+        if user.id != message.author.id and not user.bot:
+            return True
+    return False
+
+
+async def _get_lounge_relay_webhook(channel):
+    cached = lounge_relay_webhooks.get(channel.id)
+    if cached:
+        return cached
+
+    webhooks = await channel.webhooks()
+    for webhook in webhooks:
+        if webhook.user and webhook.user.id == channel.guild.me.id and webhook.name == "Lounge Relay":
+            lounge_relay_webhooks[channel.id] = webhook
+            return webhook
+
+    webhook = await channel.create_webhook(name="Lounge Relay", reason="Silent lounge chat relay")
+    lounge_relay_webhooks[channel.id] = webhook
+    return webhook
+
+
+async def _relay_silent_lounge_message(message):
+    """Re-post lounge voice-text without @mention so Discord sends no push notification."""
+    if not SILENT_LOUNGE_CHAT_UNLESS_MENTION:
+        return False
+    if message.author.bot or not message.guild:
+        return False
+    if not isinstance(message.channel, discord.VoiceChannel):
+        return False
+    if room_kinds.get(message.channel.id) != "lounge":
+        return False
+    if message.content.startswith("!"):
+        return False
+    if _message_has_user_mention(message):
+        return False
+    if not message.content and not message.attachments and not message.stickers:
+        return False
+
+    me = message.guild.me
+    if not me.guild_permissions.manage_messages or not me.guild_permissions.manage_webhooks:
+        return False
+
+    try:
+        files = [await attachment.to_file() for attachment in message.attachments]
+        webhook = await _get_lounge_relay_webhook(message.channel)
+        await message.delete()
+        await webhook.send(
+            content=message.content or "\u200b",
+            username=message.author.display_name,
+            avatar_url=message.author.display_avatar.url,
+            files=files or None,
+            suppress=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+            wait=True,
+        )
+        return True
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print(f"Silent lounge relay failed in {message.channel.name}: {exc}")
+        return False
+
+
+def _register_existing_lounge_rooms(guild):
+    """Restore lounge tracking after bot restart (rooms still exist in Discord)."""
+    lounge_suffix = "'s Lounge"
+    hub_ids = set(JOIN_TO_CREATE_CHANNELS.keys())
+
+    for hub_id, config in JOIN_TO_CREATE_CHANNELS.items():
+        if config["kind"] != "lounge":
+            continue
+        hub = guild.get_channel(hub_id)
+        if not hub or not hub.category:
+            continue
+
+        for voice_channel in hub.category.voice_channels:
+            if voice_channel.id in hub_ids:
+                continue
+            if voice_channel.name.endswith(lounge_suffix):
+                room_kinds[voice_channel.id] = "lounge"
+
 
 # Game roles — replace role_id with real Discord role IDs (Developer mode → copy ID)
 # Set role_id to 0 to skip a game until you add the ID.
@@ -487,50 +628,95 @@ class RenameModal(discord.ui.Modal, title="Change Room Name"):
 
 
 class ControlPanelView(discord.ui.View):
-    def __init__(self, channel):
+    def __init__(self, channel_id: int):
         super().__init__(timeout=None)
-        self.channel = channel
+        self.channel_id = channel_id
 
-    @discord.ui.button(label="Lock Room", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="lock_room")
-    async def lock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != owners.get(self.channel.id):
+        lock_btn = discord.ui.Button(
+            label="Lock Room", style=discord.ButtonStyle.danger, emoji="🔒",
+            custom_id=f"legends:lock:{channel_id}",
+        )
+        lock_btn.callback = self.lock_button
+        self.add_item(lock_btn)
+
+        unlock_btn = discord.ui.Button(
+            label="Unlock Room", style=discord.ButtonStyle.success, emoji="🔓",
+            custom_id=f"legends:unlock:{channel_id}",
+        )
+        unlock_btn.callback = self.unlock_button
+        self.add_item(unlock_btn)
+
+        rename_btn = discord.ui.Button(
+            label="Rename", style=discord.ButtonStyle.primary, emoji="📝",
+            custom_id=f"legends:rename:{channel_id}",
+        )
+        rename_btn.callback = self.rename_button
+        self.add_item(rename_btn)
+
+        kick_btn = discord.ui.Button(
+            label="Kick Member", style=discord.ButtonStyle.secondary, emoji="👞",
+            custom_id=f"legends:kick:{channel_id}",
+        )
+        kick_btn.callback = self.kick_button
+        self.add_item(kick_btn)
+
+        level_btn = discord.ui.Button(
+            label="Check Level", style=discord.ButtonStyle.primary, emoji="📊",
+            custom_id=f"legends:level:{channel_id}",
+        )
+        level_btn.callback = self.check_level_button
+        self.add_item(level_btn)
+
+    def _get_channel(self, interaction: discord.Interaction):
+        return interaction.guild.get_channel(self.channel_id)
+
+    async def lock_button(self, interaction: discord.Interaction):
+        channel = self._get_channel(interaction)
+        if not channel:
+            return await interaction.response.send_message("Room no longer exists.", ephemeral=True)
+        if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
         boy_role = interaction.guild.get_role(BOY_ROLE_ID)
         girl_role = interaction.guild.get_role(GIRL_ROLE_ID)
         if boy_role:
-            await self.channel.set_permissions(boy_role, connect=False)
+            await channel.set_permissions(boy_role, connect=False)
         if girl_role:
-            await self.channel.set_permissions(girl_role, connect=False)
+            await channel.set_permissions(girl_role, connect=False)
         await interaction.response.send_message("Room locked.", ephemeral=True)
 
-    @discord.ui.button(label="Unlock Room", style=discord.ButtonStyle.success, emoji="🔓", custom_id="unlock_room")
-    async def unlock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != owners.get(self.channel.id):
+    async def unlock_button(self, interaction: discord.Interaction):
+        channel = self._get_channel(interaction)
+        if not channel:
+            return await interaction.response.send_message("Room no longer exists.", ephemeral=True)
+        if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
         boy_role = interaction.guild.get_role(BOY_ROLE_ID)
         girl_role = interaction.guild.get_role(GIRL_ROLE_ID)
         if boy_role:
-            await self.channel.set_permissions(boy_role, connect=True, view_channel=True, speak=True)
+            await channel.set_permissions(boy_role, connect=True, view_channel=True, speak=True)
         if girl_role:
-            await self.channel.set_permissions(girl_role, connect=True, view_channel=True, speak=True)
+            await channel.set_permissions(girl_role, connect=True, view_channel=True, speak=True)
         await interaction.response.send_message("Room unlocked.", ephemeral=True)
 
-    @discord.ui.button(label="Rename", style=discord.ButtonStyle.primary, emoji="📝", custom_id="rename_room")
-    async def rename_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != owners.get(self.channel.id):
+    async def rename_button(self, interaction: discord.Interaction):
+        channel = self._get_channel(interaction)
+        if not channel:
+            return await interaction.response.send_message("Room no longer exists.", ephemeral=True)
+        if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
-        await interaction.response.send_modal(RenameModal(self.channel))
+        await interaction.response.send_modal(RenameModal(channel))
 
-    @discord.ui.button(label="Kick Member", style=discord.ButtonStyle.secondary, emoji="👞", custom_id="kick_member")
-    async def kick_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != owners.get(self.channel.id):
+    async def kick_button(self, interaction: discord.Interaction):
+        channel = self._get_channel(interaction)
+        if not channel:
+            return await interaction.response.send_message("Room no longer exists.", ephemeral=True)
+        if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
-        await interaction.response.send_message("Choose who to disconnect:", view=KickView(self.channel), ephemeral=True)
+        await interaction.response.send_message("Choose who to disconnect:", view=KickView(channel), ephemeral=True)
 
-    @discord.ui.button(label="Check Level", style=discord.ButtonStyle.primary, emoji="📊", custom_id="check_my_level")
-    async def check_level_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def check_level_button(self, interaction: discord.Interaction):
         user_data = user_levels.get(interaction.user.id, {"xp": 0, "level": 0})
         embed_stats = discord.Embed(
             title="YOUR LIVE STATS",
@@ -566,6 +752,9 @@ async def on_ready():
     for guild in bot.guilds:
         try:
             await guild.chunk()
+            _register_existing_lounge_rooms(guild)
+            for channel_id in list(room_kinds.keys()):
+                bot.add_view(ControlPanelView(channel_id))
             success, message = await _apply_guild_notification_settings(guild)
             if success and "updated" in message.lower():
                 print(message)
@@ -742,6 +931,45 @@ async def test_welcome_cmd(ctx, member: discord.Member = None):
         await ctx.send(f"Welcome test failed: {e}")
 
 
+@bot.command(name="panel", aliases=["controlpanel", "roompanel"])
+async def repost_panel_cmd(ctx):
+    """Repost room control panel in your current voice room."""
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        return await ctx.send("Join your voice room first, then run `!panel` in its chat.", delete_after=10)
+
+    channel = ctx.author.voice.channel
+    is_bot_room = channel.id in owners or channel.id in room_kinds
+    if not is_bot_room:
+        return await ctx.send("This voice channel is not a bot-managed room.", delete_after=10)
+
+    owner_id = owners.get(channel.id, ctx.author.id)
+    if ctx.author.id != owner_id:
+        return await ctx.send("Only the room owner can repost the control panel.", delete_after=10)
+
+    owners.setdefault(channel.id, ctx.author.id)
+
+    config_kind = room_kinds.get(channel.id, "lounge")
+    titles = {
+        "lounge": "HUB CENTRAL INTERFACE",
+        "support": "SUPPORT ROOM",
+        "verification": "VERIFICATION ROOM",
+    }
+    user_data = user_levels.get(ctx.author.id, {"xp": 0, "level": 0})
+    embed = discord.Embed(
+        title=titles.get(config_kind, "ROOM CONTROL"),
+        description=f"Welcome {ctx.author.mention}!",
+        color=discord.Color.from_rgb(114, 137, 218),
+    )
+    embed.add_field(name="Owner", value=ctx.author.mention, inline=True)
+    embed.add_field(name="Level", value=f"`Level {user_data['level']}`", inline=True)
+
+    await _send_room_control_panel(channel, ctx.author, embed)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
 @bot.command(name="setnotifications", aliases=["mentionsonly", "notifmentions"])
 @commands.has_permissions(manage_guild=True)
 async def set_notifications_cmd(ctx):
@@ -752,10 +980,11 @@ async def set_notifications_cmd(ctx):
     embed.add_field(
         name="Important",
         value=(
-            "This sets the **server default** for new members only.\n"
-            "Existing members must set manually:\n"
-            "• Server name → **Notification Settings** → **Only @mentions**\n"
-            "• Or right-click a voice/text channel → **Notification Settings** → **Only @mentions**"
+            "Server default = **new members only**.\n"
+            "**You** must set manually on your Discord:\n"
+            "• Server icon → **Notification Settings** → **Only @mentions**\n"
+            "• Right-click lounge category → **Notification Settings** → **Only @mentions**\n\n"
+            "Lounge rooms: messages **without @mention** are auto-silent (no push)."
         ),
         inline=False,
     )
@@ -885,8 +1114,17 @@ async def on_voice_state_update(member, before, after):
         await _create_join_to_create_room(member, after.channel)
 
     if before.channel and before.channel.id in owners and len(before.channel.members) == 0:
-        owners.pop(before.channel.id)
+        owners.pop(before.channel.id, None)
+        room_kinds.pop(before.channel.id, None)
+        lounge_relay_webhooks.pop(before.channel.id, None)
         await before.channel.delete()
+
+
+@bot.event
+async def on_message(message):
+    if await _relay_silent_lounge_message(message):
+        return
+    await bot.process_commands(message)
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
