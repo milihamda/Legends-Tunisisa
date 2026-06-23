@@ -263,6 +263,32 @@ PANEL_EMOJI_RENAME = discord.PartialEmoji(name="50377", id=1518983214511820850)
 PANEL_EMOJI_KICK = discord.PartialEmoji(name="50378", id=1518983216575741292)
 PANEL_EMOJI_LEVEL = discord.PartialEmoji(name="50379", id=1518983219372884038)
 
+PANEL_EMOJI_FALLBACKS = {
+    "lock": "🔒",
+    "unlock": "🔓",
+    "rename": "📝",
+    "kick": "👞",
+    "level": "📊",
+}
+
+
+def _get_panel_emojis(guild):
+    """Use custom emojis only when they exist on this server; else unicode fallback."""
+    customs = {
+        "lock": PANEL_EMOJI_LOCK,
+        "unlock": PANEL_EMOJI_UNLOCK,
+        "rename": PANEL_EMOJI_RENAME,
+        "kick": PANEL_EMOJI_KICK,
+        "level": PANEL_EMOJI_LEVEL,
+    }
+    emojis = {}
+    for key, partial in customs.items():
+        if guild and guild.get_emoji(partial.id):
+            emojis[key] = partial
+        else:
+            emojis[key] = PANEL_EMOJI_FALLBACKS[key]
+    return emojis
+
 
 def _build_room_panel_embed(member, channel, kind="lounge"):
     description = (
@@ -289,11 +315,17 @@ async def _send_room_control_panel(channel, owner, embed=None, *, kind="lounge")
     """Post control panel embed + buttons in the voice channel text chat."""
     if embed is None:
         embed = _build_room_panel_embed(owner, channel, kind)
-    view = ControlPanelView(channel.id)
+
+    guild = channel.guild
+    view = ControlPanelView(channel.id, emojis=_get_panel_emojis(guild))
     bot.add_view(view)
 
     try:
-        await channel.send(embed=embed, view=view)
+        await channel.send(
+            content=f"{owner.mention} — open **chat** here to use the panel below.",
+            embed=embed,
+            view=view,
+        )
     except discord.Forbidden:
         print(f"Cannot send control panel in {channel.name}: missing Send Messages permission")
         try:
@@ -312,6 +344,16 @@ async def _send_room_control_panel(channel, owner, embed=None, *, kind="lounge")
             pass
     except discord.HTTPException as exc:
         print(f"Control panel send failed in {channel.name}: {exc.text}")
+        fallback_view = ControlPanelView(channel.id, emojis=PANEL_EMOJI_FALLBACKS)
+        bot.add_view(fallback_view)
+        try:
+            await channel.send(
+                content=f"{owner.mention} — open **chat** here to use the panel below.",
+                embed=embed,
+                view=fallback_view,
+            )
+        except discord.HTTPException as retry_exc:
+            print(f"Control panel fallback send failed in {channel.name}: {retry_exc.text}")
 
 
 async def _notify_roles_members(guild, role_ids, embed):
@@ -655,14 +697,15 @@ class RenameModal(discord.ui.Modal, title="Change Room Name"):
 
 
 class ControlPanelView(discord.ui.View):
-    def __init__(self, channel_id: int):
+    def __init__(self, channel_id: int, emojis=None):
         super().__init__(timeout=None)
         self.channel_id = channel_id
+        emojis = emojis or PANEL_EMOJI_FALLBACKS
 
         lock_btn = discord.ui.Button(
             label="Lock",
             style=discord.ButtonStyle.secondary,
-            emoji=PANEL_EMOJI_LOCK,
+            emoji=emojis["lock"],
             custom_id=f"legends:lock:{channel_id}",
             row=0,
         )
@@ -672,7 +715,7 @@ class ControlPanelView(discord.ui.View):
         unlock_btn = discord.ui.Button(
             label="Unlock",
             style=discord.ButtonStyle.secondary,
-            emoji=PANEL_EMOJI_UNLOCK,
+            emoji=emojis["unlock"],
             custom_id=f"legends:unlock:{channel_id}",
             row=0,
         )
@@ -682,7 +725,7 @@ class ControlPanelView(discord.ui.View):
         rename_btn = discord.ui.Button(
             label="Rename",
             style=discord.ButtonStyle.secondary,
-            emoji=PANEL_EMOJI_RENAME,
+            emoji=emojis["rename"],
             custom_id=f"legends:rename:{channel_id}",
             row=0,
         )
@@ -692,7 +735,7 @@ class ControlPanelView(discord.ui.View):
         kick_btn = discord.ui.Button(
             label="Kick",
             style=discord.ButtonStyle.secondary,
-            emoji=PANEL_EMOJI_KICK,
+            emoji=emojis["kick"],
             custom_id=f"legends:kick:{channel_id}",
             row=1,
         )
@@ -702,7 +745,7 @@ class ControlPanelView(discord.ui.View):
         level_btn = discord.ui.Button(
             label="Check Level",
             style=discord.ButtonStyle.secondary,
-            emoji=PANEL_EMOJI_LEVEL,
+            emoji=emojis["level"],
             custom_id=f"legends:level:{channel_id}",
             row=2,
         )
@@ -787,7 +830,9 @@ async def on_ready():
             await guild.chunk()
             _register_existing_lounge_rooms(guild)
             for channel_id in list(room_kinds.keys()):
-                bot.add_view(ControlPanelView(channel_id))
+                ch = guild.get_channel(channel_id)
+                emojis = _get_panel_emojis(guild) if ch else PANEL_EMOJI_FALLBACKS
+                bot.add_view(ControlPanelView(channel_id, emojis=emojis))
             success, message = await _apply_guild_notification_settings(guild)
             if success and "updated" in message.lower():
                 print(message)
