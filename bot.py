@@ -260,8 +260,9 @@ async def _restore_room_join_permissions(channel, guild):
 PANEL_EMOJI_LOCK = discord.PartialEmoji(name="50376", id=1518983212066668675)
 PANEL_EMOJI_UNLOCK = discord.PartialEmoji(name="50375", id=1518983208224559214)
 PANEL_EMOJI_RENAME = discord.PartialEmoji(name="50377", id=1518983214511820850)
-PANEL_EMOJI_KICK = discord.PartialEmoji(name="50378", id=1518983216575741292)
+PANEL_EMOJI_KICK = discord.PartialEmoji(name="50378", id=1518983216575414292)
 PANEL_EMOJI_LEVEL = discord.PartialEmoji(name="50379", id=1518983219372884038)
+PANEL_EMOJI_CROWN = discord.PartialEmoji(name="50399", id=1519035786002038915)
 
 PANEL_EMOJI_FALLBACKS = {
     "lock": "🔒",
