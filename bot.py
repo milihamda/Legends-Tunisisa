@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -65,6 +66,60 @@ ROLE_LVL_20 = 1518012596824047677
 ROLE_LVL_30 = 1518012707553546421
 ROLE_LVL_40 = 1518012815116468284
 ROLE_LVL_50 = 1518012943940325406
+ROLE_LVL_60 = 1518805640594850002
+ROLE_LVL_70 = 1518805913530535987
+ROLE_LVL_80 = 1518806076009746543
+ROLE_LVL_90 = 1518806185896185936
+ROLE_LVL_100 = 1518806344373637271
+
+# Voice leveling: Lv1 = 5 min, Lv2 = +10 min (15 total), Lv3 = +15 min (30 total), ...
+LEVEL_MINUTES_BASE = 5
+MAX_VOICE_LEVEL = 1000
+
+
+def voice_minutes_for_level(level: int) -> int:
+    """Total voice minutes required to reach `level`."""
+    return LEVEL_MINUTES_BASE * level * (level + 1) // 2
+
+
+def level_from_voice_minutes(minutes: int) -> int:
+    """Highest level reachable with `minutes` of voice time."""
+    if minutes <= 0:
+        return 0
+    level = int((-1 + math.sqrt(1 + 8 * minutes / LEVEL_MINUTES_BASE)) // 2)
+    return min(level, MAX_VOICE_LEVEL)
+
+
+def minutes_for_next_level(current_level: int) -> int:
+    """Minutes needed to go from `current_level` to the next level."""
+    return LEVEL_MINUTES_BASE * (current_level + 1)
+
+
+def _normalize_user_level_data(raw: dict) -> dict:
+    if "voice_minutes" in raw:
+        minutes = int(raw["voice_minutes"])
+    else:
+        minutes = int(raw.get("xp", 0)) // 10
+    return {
+        "voice_minutes": minutes,
+        "level": level_from_voice_minutes(minutes),
+    }
+
+
+def _get_user_level_data(user_id: int) -> dict:
+    return _normalize_user_level_data(user_levels.get(user_id, {}))
+
+
+def _format_level_stats(user_data: dict) -> str:
+    level = user_data["level"]
+    minutes = user_data["voice_minutes"]
+    remaining = max(0, voice_minutes_for_level(level + 1) - minutes)
+    return (
+        f"• **Current Level:** `Level {level}`\n"
+        f"• **Voice Time:** `{minutes} min`\n"
+        f"• **Next Level:** `{remaining} min` remaining"
+    )
+
 
 intents = discord.Intents.default()
 intents.voice_states = True
@@ -169,7 +224,7 @@ async def _create_join_to_create_room(member, trigger_channel):
     room_kinds[new_channel.id] = config["kind"]
     await member.move_to(new_channel)
 
-    user_data = user_levels.get(member.id, {"xp": 0, "level": 0})
+    user_data = _get_user_level_data(member.id)
     embed = discord.Embed(
         title=config["title"],
         description=f"Welcome {member.mention}!",
@@ -495,7 +550,9 @@ async def load_database_from_discord():
         try:
             with open(DB_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                user_levels = {int(k): v for k, v in data.items()}
+                user_levels = {
+                    int(k): _normalize_user_level_data(v) for k, v in data.items()
+                }
                 print("Loaded from local JSON file.")
                 return
         except Exception:
@@ -507,7 +564,9 @@ async def load_database_from_discord():
                 if message.author == bot.user and message.content.startswith("```json"):
                     clean_content = message.content.strip("```json").strip("```")
                     data = json.loads(clean_content)
-                    user_levels = {int(k): v for k, v in data.items()}
+                    user_levels = {
+                        int(k): _normalize_user_level_data(v) for k, v in data.items()
+                    }
                     print("Restored levels from Discord backup channel.")
                     with open(DB_FILE, "w", encoding="utf-8") as f:
                         json.dump(user_levels, f, ensure_ascii=False, indent=4)
@@ -674,14 +733,10 @@ class ControlPanelView(discord.ui.View):
         await interaction.response.send_message("Choose who to disconnect:", view=KickView(channel), ephemeral=True)
 
     async def check_level_button(self, interaction: discord.Interaction):
-        user_data = user_levels.get(interaction.user.id, {"xp": 0, "level": 0})
+        user_data = _get_user_level_data(interaction.user.id)
         embed_stats = discord.Embed(
             title="YOUR LIVE STATS",
-            description=(
-                f"Hello {interaction.user.mention}!\n\n"
-                f"• **Current Level:** `Level {user_data['level']}`\n"
-                f"• **Total Experience:** `{user_data['xp']} XP`"
-            ),
+            description=f"Hello {interaction.user.mention}!\n\n{_format_level_stats(user_data)}",
             color=discord.Color.blue(),
         )
         embed_stats.set_thumbnail(url=interaction.user.display_avatar.url)
@@ -758,21 +813,17 @@ async def update_levels_task():
                     continue
 
                 user_id = member.id
-                if user_id not in user_levels:
-                    user_levels[user_id] = {"xp": 0, "level": 0}
-
-                user_levels[user_id]["xp"] += 10
-                new_calculated_level = user_levels[user_id]["xp"] // 150
-
-                if new_calculated_level > 1000:
-                    new_calculated_level = 1000
+                user_data = _get_user_level_data(user_id)
+                old_lvl = user_data["level"]
+                user_data["voice_minutes"] += 1
+                new_calculated_level = level_from_voice_minutes(user_data["voice_minutes"])
+                user_data["level"] = new_calculated_level
+                user_levels[user_id] = user_data
 
                 data_changed = True
 
-                if new_calculated_level > user_levels[user_id]["level"]:
-                    old_lvl = user_levels[user_id]["level"]
-                    user_levels[user_id]["level"] = new_calculated_level
-                    current_lvl = user_levels[user_id]["level"]
+                if new_calculated_level > old_lvl:
+                    current_lvl = new_calculated_level
 
                     if log_channel:
                         try:
@@ -782,7 +833,7 @@ async def update_levels_task():
                                 title="LEVEL UP!",
                                 description=(
                                     f"{member.mention} reached **Level {current_lvl}**.\n"
-                                    f"*Total XP: {user_levels[user_id]['xp']}*"
+                                    f"*Voice Time: {user_data['voice_minutes']} min*"
                                 ),
                                 color=discord.Color.from_rgb(231, 76, 60),
                             )
@@ -794,7 +845,7 @@ async def update_levels_task():
                                 title="LEVEL UP!",
                                 description=(
                                     f"{member.mention} reached **Level {current_lvl}**.\n"
-                                    f"*Total XP: {user_levels[user_id]['xp']}*"
+                                    f"*Voice Time: {user_data['voice_minutes']} min*"
                                 ),
                                 color=discord.Color.gold(),
                             )
@@ -824,15 +875,11 @@ async def check_user_level_cmd(ctx, member: discord.Member = None):
     if target_member.bot:
         return await ctx.send("Bots do not have voice leveling profiles.")
 
-    user_data = user_levels.get(target_member.id, {"xp": 0, "level": 0})
+    user_data = _get_user_level_data(target_member.id)
 
     embed_cmd = discord.Embed(
         title="ARENA LEVEL REGISTRY",
-        description=(
-            f"Stats for: {target_member.mention}\n\n"
-            f"• **Current Level:** `Level {user_data['level']}`\n"
-            f"• **Experience Points:** `{user_data['xp']} XP`"
-        ),
+        description=f"Stats for: {target_member.mention}\n\n{_format_level_stats(user_data)}",
         color=discord.Color.from_rgb(46, 204, 113),
     )
     embed_cmd.set_thumbnail(url=target_member.display_avatar.url)
@@ -844,7 +891,7 @@ async def check_user_level_cmd(ctx, member: discord.Member = None):
 async def test_levelup_cmd(ctx, member: discord.Member = None, old: int = None, new: int = None):
     """Preview level-up card (admin). Example: !testlevelup @user 2 3"""
     target = member or ctx.author
-    user_data = user_levels.get(target.id, {"xp": 0, "level": 5})
+    user_data = _get_user_level_data(target.id)
     old_lvl = old if old is not None else max(0, user_data["level"] - 1)
     new_lvl = new if new is not None else user_data["level"]
 
@@ -911,7 +958,7 @@ async def repost_panel_cmd(ctx):
         "support": "SUPPORT ROOM",
         "verification": "VERIFICATION ROOM",
     }
-    user_data = user_levels.get(ctx.author.id, {"xp": 0, "level": 0})
+    user_data = _get_user_level_data(ctx.author.id)
     embed = discord.Embed(
         title=titles.get(config_kind, "ROOM CONTROL"),
         description=f"Welcome {ctx.author.mention}!",
