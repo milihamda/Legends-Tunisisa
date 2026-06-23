@@ -974,6 +974,57 @@ async def repost_panel_cmd(ctx):
         pass
 
 
+def _is_bot_managed_voice_room(channel):
+    return isinstance(channel, discord.VoiceChannel) and (
+        channel.id in owners or channel.id in room_kinds
+    )
+
+
+async def _purge_channel_messages(channel):
+    """Delete as many messages as Discord allows (bulk purge: last 14 days)."""
+    total = 0
+    while True:
+        deleted = await channel.purge(limit=100)
+        total += len(deleted)
+        if len(deleted) < 100:
+            break
+    return total
+
+
+@bot.command(name="clear", aliases=["clearchat", "purgechat", "purge"])
+async def clear_chat_cmd(ctx):
+    """Clear all messages in this chat (room owner or Manage Messages)."""
+    channel = ctx.channel
+    if not isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.Thread)):
+        return await ctx.send("Use this in a text or voice chat.", delete_after=8)
+
+    if _is_bot_managed_voice_room(channel):
+        owner_id = owners.get(channel.id, ctx.author.id)
+        if ctx.author.id != owner_id and not ctx.author.guild_permissions.manage_messages:
+            return await ctx.send("Only the room owner can clear this chat.", delete_after=8)
+    elif not ctx.author.guild_permissions.manage_messages:
+        return await ctx.send("You need **Manage Messages** to clear this channel.", delete_after=8)
+
+    if not ctx.guild.me.guild_permissions.manage_messages:
+        return await ctx.send("I need **Manage Messages** to clear chat.", delete_after=8)
+
+    try:
+        try:
+            await ctx.message.delete()
+        except discord.Forbidden:
+            pass
+
+        removed = await _purge_channel_messages(channel)
+        msg = f"Chat cleared by **{ctx.author.display_name}** ({removed} message(s) removed)."
+        if _is_bot_managed_voice_room(channel):
+            msg += "\nUse `!panel` to repost the control panel."
+        await channel.send(msg, delete_after=5)
+    except discord.Forbidden:
+        await channel.send("I cannot delete messages here.", delete_after=8)
+    except discord.HTTPException as exc:
+        await channel.send(f"Could not clear chat: {exc.text}", delete_after=8)
+
+
 @bot.command(name="setnotifications", aliases=["mentionsonly", "notifmentions"])
 @commands.has_permissions(manage_guild=True)
 async def set_notifications_cmd(ctx):
