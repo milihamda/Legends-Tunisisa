@@ -274,6 +274,7 @@ PANEL_EMOJI_FALLBACKS = {
     "rename": "📝",
     "kick": "👞",
     "level": "📊",
+    "transfer": "👑",
 }
 
 
@@ -283,6 +284,7 @@ PANEL_EMOJI_CUSTOM = {
     "rename": PANEL_EMOJI_RENAME,
     "kick": PANEL_EMOJI_KICK,
     "level": PANEL_EMOJI_LEVEL,
+    "transfer": PANEL_EMOJI_CROWN,
 }
 
 
@@ -344,18 +346,24 @@ async def _transfer_room_ownership(
     new_owner: discord.Member,
     *,
     former_owner_id: int | None = None,
+    transfer_reason: str = "auto",
 ):
     former_owner_id = former_owner_id or owners.get(channel.id)
+    _cancel_owner_transfer(channel.id)
     owners[channel.id] = new_owner.id
     if former_owner_id:
         await _apply_owner_permissions(channel, former_owner_id, new_owner)
     kind = room_kinds.get(channel.id, "lounge")
     await _send_room_control_panel(channel, new_owner, kind=kind)
-    try:
-        await channel.send(
+    if transfer_reason == "manual":
+        notice = f"👑 {new_owner.mention} is now the room owner (transferred by the previous owner)."
+    else:
+        notice = (
             f"👑 {new_owner.mention} is now the room owner "
             f"(previous owner did not return within {OWNER_ABSENCE_SECONDS}s)."
         )
+    try:
+        await channel.send(notice)
     except discord.HTTPException:
         pass
 
@@ -771,6 +779,66 @@ class KickView(discord.ui.View):
         self.add_item(KickUserSelect(channel))
 
 
+class TransferOwnerSelect(discord.ui.Select):
+    def __init__(self, channel, owner_id: int):
+        self.channel = channel
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label=member.display_name, value=str(member.id), emoji=PANEL_EMOJI_CROWN)
+            for member in channel.members
+            if not member.bot and member.id != owner_id
+        ]
+        if not options:
+            options = [
+                discord.SelectOption(label="No other members in the room", value="none", disabled=True)
+            ]
+
+        super().__init__(
+            placeholder="Select the new room owner...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            return await interaction.response.send_message(
+                "There is no one else in the room to transfer ownership to.",
+                ephemeral=True,
+            )
+
+        if interaction.user.id != owners.get(self.channel.id):
+            return await interaction.response.send_message(
+                "Only the room owner can transfer ownership.",
+                ephemeral=True,
+            )
+
+        member_id = int(self.values[0])
+        new_owner = interaction.guild.get_member(member_id)
+        if not new_owner or not new_owner.voice or new_owner.voice.channel.id != self.channel.id:
+            return await interaction.response.send_message(
+                "That user is no longer in your room.",
+                ephemeral=True,
+            )
+
+        await _transfer_room_ownership(
+            self.channel,
+            new_owner,
+            former_owner_id=interaction.user.id,
+            transfer_reason="manual",
+        )
+        await interaction.response.send_message(
+            f"Ownership transferred to **{new_owner.display_name}**.",
+            ephemeral=True,
+        )
+
+
+class TransferOwnerView(discord.ui.View):
+    def __init__(self, channel, owner_id: int):
+        super().__init__(timeout=60)
+        self.add_item(TransferOwnerSelect(channel, owner_id))
+
+
 class RenameModal(discord.ui.Modal, title="Change Room Name"):
     channel_name = discord.ui.TextInput(label="New Room Name", placeholder="Enter channel name...", max_length=30, required=True)
 
@@ -829,6 +897,16 @@ class ControlPanelView(discord.ui.View):
         kick_btn.callback = self.kick_button
         self.add_item(kick_btn)
 
+        transfer_btn = discord.ui.Button(
+            label="Transfer",
+            style=discord.ButtonStyle.secondary,
+            emoji=PANEL_EMOJI_CROWN,
+            custom_id=f"legends:transfer:{channel_id}",
+            row=1,
+        )
+        transfer_btn.callback = self.transfer_button
+        self.add_item(transfer_btn)
+
         level_btn = discord.ui.Button(
             label="Check Level",
             style=discord.ButtonStyle.secondary,
@@ -882,6 +960,29 @@ class ControlPanelView(discord.ui.View):
         if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
         await interaction.response.send_message("Choose who to disconnect:", view=KickView(channel), ephemeral=True)
+
+    async def transfer_button(self, interaction: discord.Interaction):
+        channel = self._get_channel(interaction)
+        if not channel:
+            return await interaction.response.send_message("Room no longer exists.", ephemeral=True)
+        if interaction.user.id != owners.get(self.channel_id):
+            return await interaction.response.send_message(
+                "Only the room owner can use these controls.",
+                ephemeral=True,
+            )
+
+        others = [m for m in channel.members if not m.bot and m.id != interaction.user.id]
+        if not others:
+            return await interaction.response.send_message(
+                "There is no one else in the room to transfer ownership to.",
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            "Choose who gets ownership:",
+            view=TransferOwnerView(channel, interaction.user.id),
+            ephemeral=True,
+        )
 
     async def check_level_button(self, interaction: discord.Interaction):
         user_data = _get_user_level_data(interaction.user.id)
