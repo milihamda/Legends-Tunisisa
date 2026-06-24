@@ -578,8 +578,53 @@ async def _delete_temp_voice_channel(channel: discord.VoiceChannel, *, reason: s
         print(f"Failed to delete temp room {channel.name}: {exc.text}")
 
 
+async def _purge_empty_temp_rooms(guild, *, reason: str = "Empty temp voice room cleanup"):
+    """Delete empty bot-managed temp voice rooms."""
+    skip_ids = _JOIN_TO_CREATE_HUB_IDS | {BOT_VOICE_CHANNEL_ID}
+    deleted_ids = set()
+
+    for channel_id in set(owners) | set(room_kinds):
+        if channel_id in skip_ids:
+            continue
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            _clear_temp_room_tracking(channel_id)
+            continue
+        if len(channel.members) == 0:
+            await _delete_temp_voice_channel(channel, reason=reason)
+            deleted_ids.add(channel_id)
+            print(f"Deleted empty tracked temp room: {channel.name}")
+
+    scanned_categories = set()
+    for hub_id in _JOIN_TO_CREATE_HUB_IDS:
+        hub = guild.get_channel(hub_id)
+        if not hub or not hub.category:
+            continue
+        category = hub.category
+        if category.id in scanned_categories:
+            continue
+        scanned_categories.add(category.id)
+
+        for voice_channel in category.voice_channels:
+            if voice_channel.id in skip_ids or voice_channel.id in deleted_ids:
+                continue
+
+            kind = _temp_room_kind_from_name(voice_channel.name)
+            if kind is None:
+                continue
+
+            if len(voice_channel.members) == 0:
+                await _delete_temp_voice_channel(voice_channel, reason=reason)
+                print(f"Deleted empty temp room: {voice_channel.name}")
+
+
 async def _cleanup_and_register_temp_rooms(guild):
     """On startup: delete empty temp voice rooms; re-track occupied ones."""
+    await _purge_empty_temp_rooms(
+        guild,
+        reason="Empty temp voice room cleanup after bot restart",
+    )
+
     skip_ids = _JOIN_TO_CREATE_HUB_IDS | {BOT_VOICE_CHANNEL_ID}
     scanned_categories = set()
 
@@ -601,11 +646,6 @@ async def _cleanup_and_register_temp_rooms(guild):
                 continue
 
             if len(voice_channel.members) == 0:
-                await _delete_temp_voice_channel(
-                    voice_channel,
-                    reason="Empty temp voice room cleanup after bot restart",
-                )
-                print(f"Deleted empty temp room: {voice_channel.name}")
                 continue
 
             owner = _infer_room_owner(voice_channel)
@@ -1087,6 +1127,7 @@ async def on_ready():
 
     update_levels_task.start()
     bot_chat_keepalive_task.start()
+    empty_temp_rooms_cleanup_task.start()
     bot.add_view(GameRolePickerView())
 
     for guild in bot.guilds:
@@ -1124,8 +1165,25 @@ async def bot_chat_keepalive_task():
             print(f"Bot chat keepalive failed for {guild.name}: {e}")
 
 
+@tasks.loop(minutes=5.0)
+async def empty_temp_rooms_cleanup_task():
+    for guild in bot.guilds:
+        try:
+            await _purge_empty_temp_rooms(
+                guild,
+                reason="Empty temp voice room periodic cleanup",
+            )
+        except Exception as e:
+            print(f"Empty temp room cleanup failed for {guild.name}: {e}")
+
+
 @bot_chat_keepalive_task.before_loop
 async def before_bot_chat_keepalive_task():
+    await bot.wait_until_ready()
+
+
+@empty_temp_rooms_cleanup_task.before_loop
+async def before_empty_temp_rooms_cleanup_task():
     await bot.wait_until_ready()
 
 
