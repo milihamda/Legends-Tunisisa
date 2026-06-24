@@ -237,6 +237,7 @@ class ControlPanelView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    await bot.change_presence(status=discord.Status.dnd)
     await load_database_from_discord()
     voice_channel = bot.get_channel(BOT_VOICE_CHANNEL_ID)
     if voice_channel:
