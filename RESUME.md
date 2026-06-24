@@ -13,8 +13,9 @@
 | `!level` | — | Tout le monde | Affiche le niveau vocal et le temps passé en vocal. Sans mention → tes stats. Avec `@user` → stats de cette personne. |
 | `!panel` | `!controlpanel`, `!roompanel` | Propriétaire de la room | Reposte le panneau de contrôle dans le chat vocal de ta room. Tu dois être connecté à ta room bot-managed. |
 | `!clear` | `!clearchat`, `!purgechat`, `!purge` | Owner de la room **ou** Manage Messages | Supprime tous les messages du chat (texte ou chat vocal). Après un clear dans une room, utilise `!panel` pour remettre les boutons. |
+| `!post` | `!say`, `!echo` | **Manage Messages** | Lit le texte que tu écris après la commande et le reposte au nom du bot. Supprime ton message de commande. Supporte les fichiers/images attachés. |
 | `!setnotifications` | `!mentionsonly`, `!notifmentions` | **Manage Server** (admin) | Met les notifications par défaut du serveur sur **@mentions only**. N'affecte que les **nouveaux** membres — chacun doit aussi régler ses notifs manuellement. |
-| `!postroles` | — | **Manage Server** (admin) | Poste le menu de sélection des rôles jeux (Valorant, Fortnite, Minecraft, etc.). Les membres choisissent leurs jeux via un menu déroulant. |
+| `!postroles` | — | **Manage Server** (admin) | Poste le menu de sélection des rôles jeux. Les membres choisissent leurs jeux via un menu déroulant. |
 | `!testlevelup` | — | Admin / test | Prévisualise la carte de level-up. Exemple : `!testlevelup @user 2 3` |
 | `!testwelcome` | — | Admin / test | Envoie une carte de bienvenue test dans le channel welcome (sans qu'un membre rejoigne). |
 
@@ -39,6 +40,12 @@
 - Dans un channel normal : il faut **Manage Messages**.
 - Le bot doit aussi avoir **Manage Messages**.
 
+### `!post` / `!say` / `!echo` [message]
+- Exemple : `!post Bienvenue à tous sur le serveur !`
+- Le bot **supprime** ta commande et **envoie** le même texte à sa place.
+- Si tu attaches une image/fichier au message `!post`, le bot reposte le texte + les fichiers.
+- Utile pour les annonces sans montrer qui a écrit la commande.
+
 ### `!setnotifications` / `!mentionsonly` / `!notifmentions`
 - Change le réglage serveur → notifications par défaut = **mentions seulement**.
 - Chaque membre doit encore configurer :
@@ -47,7 +54,7 @@
 
 ### `!postroles`
 - Poste un embed **"Select your roles"** avec un menu multi-sélection.
-- Jeux configurés : Call of Duty, GTA V, Brawlhalla, CS GO, Fortnite, Valorant, League of Legends, Minecraft.
+- Jeux configurés : Free Fire, Rust, Call of Duty, GTA V, Brawlhalla, CS GO, Fortnite, Valorant, League of Legends, Minecraft.
 - Le bot enlève les anciens rôles jeux et assigne ceux choisis.
 
 ### `!testlevelup` [@membre] [ancien_niveau] [nouveau_niveau]
@@ -89,14 +96,16 @@ Quand tu rejoins un channel **Join-to-Create**, le bot crée ta room et envoie c
 ### Join-to-Create (rooms temporaires)
 En rejoignant l'un de ces channels vocaux, le bot crée une **sous-room privée** :
 
-| Channel trigger | Room créée | Accès |
-|-----------------|------------|-------|
-| **Create Lounge** | `{pseudo}'s Lounge` | Boy + Girl roles + owner |
-| **Support** | `Support \| {pseudo}` | Staff + owner |
-| **Verification 1 / 2** | `Verify \| {pseudo}` | Staff + owner |
+| Channel trigger | Nom de la room | Accès |
+|-----------------|----------------|-------|
+| **Create Lounge** | `🎙️\|{username} ✓` | Boy + Girl roles + owner |
+| **Support** | `Support \| {username}` | Staff + owner |
+| **Verification 1 / 2** | `Verify \| {username}` | Staff + owner |
 
+- `{username}` = pseudo Discord du membre (`member.name`).
 - La room est **supprimée automatiquement** quand tout le monde la quitte.
-- Si l'owner quitte mais d'autres restent → après **60 secondes**, l'ownership passe **aléatoirement** à quelqu'un d'autre dans la room.
+- Si l'owner quitte mais d'autres restent → après **60 secondes**, l'ownership passe **aléatoirement** à quelqu'un d'autre dans la room (lounge seulement).
+- **Après restart du bot** : les rooms temporaires **vides** sont supprimées ; les rooms avec des membres sont re-enregistrées.
 
 ### Bienvenue (`on_member_join`)
 - Donne le rôle **Not Verified** au nouveau membre.
@@ -123,6 +132,7 @@ En rejoignant l'un de ces channels vocaux, le bot crée une **sous-room privée*
 
 ### Au démarrage
 - Charge la base de levels (local ou backup Discord).
+- **Nettoie les temp voice vides** et ré-enregistre celles qui ont encore des membres.
 - Ré-enregistre les panneaux des rooms existantes.
 - Applique les notifications @mentions (si activé dans `.env`).
 - Health check HTTP sur le port `PORT` (pour Render/hosting).
@@ -137,9 +147,11 @@ Version **réduite** pour tourner sur téléphone. Commandes disponibles :
 |----------|-------------|
 | `!level` | Affiche level + XP (système simplifié : +10 XP/min, level = XP ÷ 150). |
 
-**Pas inclus** dans la version all-in-one : `!panel`, `!clear`, `!postroles`, `!setnotifications`, Transfer, Support rooms, cartes level-up avancées, rôles jeux.
+**Pas inclus** dans la version all-in-one : `!panel`, `!clear`, `!post`, `!postroles`, `!setnotifications`, Transfer, Support rooms, cartes level-up avancées, rôles jeux.
 
-Boutons du panneau (version simple) : Lock, Unlock, Rename, Kick, Level — **sans** Transfer.
+- Lounge nommée : `🎙️|{username} ✓`
+- Nettoyage des lounges vides au démarrage.
+- Boutons du panneau (version simple) : Lock, Unlock, Rename, Kick, Level — **sans** Transfer.
 
 ---
 

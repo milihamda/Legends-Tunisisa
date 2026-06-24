@@ -1403,17 +1403,18 @@ async def post_roles_cmd(ctx):
 async def post_cmd(ctx, *, message: str = None):
     """Repost your message as the bot (deletes your command). Usage: !post Hello everyone"""
     content = (message or "").strip()
-    has_attachments = bool(ctx.message.attachments)
+    attachments = list(ctx.message.attachments)
 
-    if not content and not has_attachments:
+    if not content and not attachments:
         return await ctx.send("Usage: `!post your message here`", delete_after=8)
+
+    files = [await attachment.to_file() for attachment in attachments]
 
     try:
         await ctx.message.delete()
     except discord.Forbidden:
         pass
 
-    files = [await attachment.to_file() for attachment in ctx.message.attachments]
     await ctx.send(content or None, files=files or None)
 
 
