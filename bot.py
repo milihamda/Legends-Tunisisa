@@ -1,6 +1,8 @@
+import asyncio
 import json
 import math
 import os
+import random
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -131,6 +133,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 owners = {}
 room_kinds = {}
+owner_transfer_tasks = {}
+OWNER_ABSENCE_SECONDS = 60
 locked_rooms = set()
 locked_room_members = {}
 user_levels = {}
@@ -306,6 +310,92 @@ def _build_room_panel_embed(member, channel, kind="lounge"):
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text=f"ID: {member.id} • Temp Voice System")
     return embed
+
+
+def _cancel_owner_transfer(channel_id: int):
+    task = owner_transfer_tasks.pop(channel_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _apply_owner_permissions(channel, old_owner_id: int, new_owner: discord.Member):
+    guild = channel.guild
+    member_overwrite = discord.PermissionOverwrite(
+        view_channel=True,
+        connect=True,
+        speak=True,
+        send_messages=True,
+    )
+    owner_overwrite = discord.PermissionOverwrite(
+        view_channel=True,
+        connect=True,
+        speak=True,
+        send_messages=True,
+        manage_channels=True,
+    )
+    old_member = guild.get_member(old_owner_id)
+    if old_member:
+        await channel.set_permissions(old_member, overwrite=member_overwrite)
+    await channel.set_permissions(new_owner, overwrite=owner_overwrite)
+
+
+async def _transfer_room_ownership(
+    channel: discord.VoiceChannel,
+    new_owner: discord.Member,
+    *,
+    former_owner_id: int | None = None,
+):
+    former_owner_id = former_owner_id or owners.get(channel.id)
+    owners[channel.id] = new_owner.id
+    if former_owner_id:
+        await _apply_owner_permissions(channel, former_owner_id, new_owner)
+    kind = room_kinds.get(channel.id, "lounge")
+    await _send_room_control_panel(channel, new_owner, kind=kind)
+    try:
+        await channel.send(
+            f"👑 {new_owner.mention} is now the room owner "
+            f"(previous owner did not return within {OWNER_ABSENCE_SECONDS}s)."
+        )
+    except discord.HTTPException:
+        pass
+
+
+async def _owner_absence_countdown(guild_id: int, channel_id: int, former_owner_id: int):
+    try:
+        await asyncio.sleep(OWNER_ABSENCE_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    owner_transfer_tasks.pop(channel_id, None)
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return
+    channel = guild.get_channel(channel_id)
+    if not channel or channel_id not in owners:
+        return
+    if owners.get(channel_id) != former_owner_id:
+        return
+
+    former = guild.get_member(former_owner_id)
+    if former and former.voice and former.voice.channel and former.voice.channel.id == channel_id:
+        return
+
+    candidates = [m for m in channel.members if not m.bot and m.id != former_owner_id]
+    if not candidates:
+        return
+
+    new_owner = random.choice(candidates)
+    await _transfer_room_ownership(channel, new_owner, former_owner_id=former_owner_id)
+
+
+def _schedule_owner_transfer(channel: discord.VoiceChannel, former_owner_id: int):
+    if room_kinds.get(channel.id) != "lounge":
+        return
+    _cancel_owner_transfer(channel.id)
+    task = asyncio.create_task(
+        _owner_absence_countdown(channel.guild.id, channel.id, former_owner_id)
+    )
+    owner_transfer_tasks[channel.id] = task
 
 
 async def _send_room_control_panel(channel, owner, embed=None, *, kind="lounge"):
@@ -1225,6 +1315,17 @@ async def on_voice_state_update(member, before, after):
     if after.channel and after.channel.id in JOIN_TO_CREATE_CHANNELS:
         await _create_join_to_create_room(member, after.channel)
 
+    if after.channel and after.channel.id in owners and member.id == owners[after.channel.id]:
+        _cancel_owner_transfer(after.channel.id)
+
+    if (
+        before.channel
+        and before.channel.id in owners
+        and member.id == owners.get(before.channel.id)
+        and len(before.channel.members) > 0
+    ):
+        _schedule_owner_transfer(before.channel, member.id)
+
     if before.channel and before.channel.id in locked_rooms:
         allowed = locked_room_members.get(before.channel.id)
         if allowed is not None:
@@ -1235,6 +1336,7 @@ async def on_voice_state_update(member, before, after):
             pass
 
     if before.channel and before.channel.id in owners and len(before.channel.members) == 0:
+        _cancel_owner_transfer(before.channel.id)
         owners.pop(before.channel.id, None)
         room_kinds.pop(before.channel.id, None)
         locked_rooms.discard(before.channel.id)
