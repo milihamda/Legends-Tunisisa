@@ -273,22 +273,18 @@ PANEL_EMOJI_FALLBACKS = {
 }
 
 
-def _get_panel_emojis(guild):
-    """Use custom emojis only when they exist on this server; else unicode fallback."""
-    customs = {
-        "lock": PANEL_EMOJI_LOCK,
-        "unlock": PANEL_EMOJI_UNLOCK,
-        "rename": PANEL_EMOJI_RENAME,
-        "kick": PANEL_EMOJI_KICK,
-        "level": PANEL_EMOJI_LEVEL,
-    }
-    emojis = {}
-    for key, partial in customs.items():
-        if guild and guild.get_emoji(partial.id):
-            emojis[key] = partial
-        else:
-            emojis[key] = PANEL_EMOJI_FALLBACKS[key]
-    return emojis
+PANEL_EMOJI_CUSTOM = {
+    "lock": PANEL_EMOJI_LOCK,
+    "unlock": PANEL_EMOJI_UNLOCK,
+    "rename": PANEL_EMOJI_RENAME,
+    "kick": PANEL_EMOJI_KICK,
+    "level": PANEL_EMOJI_LEVEL,
+}
+
+
+def _get_panel_emojis(_guild=None):
+    """Always use server custom emoji IDs; fallback only if Discord rejects the send."""
+    return dict(PANEL_EMOJI_CUSTOM)
 
 
 def _build_room_panel_embed(member, channel, kind="lounge"):
