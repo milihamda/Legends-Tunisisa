@@ -141,9 +141,17 @@ user_levels = {}
 DB_FILE = "levels_database.json"
 bot_chat_messages = {}
 
+LOUNGE_ROOM_NAME_PREFIX = "🎙️|"
+LOUNGE_ROOM_NAME_SUFFIX = " ✓"
+
+
+def format_lounge_room_name(member_name: str) -> str:
+    return f"{LOUNGE_ROOM_NAME_PREFIX}{member_name}{LOUNGE_ROOM_NAME_SUFFIX}"
+
+
 JOIN_TO_CREATE_CHANNELS = {
     CREATE_CHANNEL_ID: {
-        "name": "{member}'s Lounge",
+        "name": "{member}",
         "title": "HUB CENTRAL INTERFACE",
         "kind": "lounge",
     },
@@ -218,7 +226,10 @@ async def _create_join_to_create_room(member, trigger_channel):
             read_message_history=True,
         )
 
-    channel_name = config["name"].format(member=member.name)
+    if config["kind"] == "lounge":
+        channel_name = format_lounge_room_name(member.name)
+    else:
+        channel_name = config["name"].format(member=member.name)
     new_channel = await guild.create_voice_channel(
         name=channel_name,
         category=category,
@@ -527,6 +538,8 @@ _JOIN_TO_CREATE_HUB_IDS = frozenset(JOIN_TO_CREATE_CHANNELS.keys())
 
 
 def _temp_room_kind_from_name(channel_name: str) -> str | None:
+    if channel_name.startswith(LOUNGE_ROOM_NAME_PREFIX) and channel_name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
+        return "lounge"
     if channel_name.endswith("'s Lounge"):
         return "lounge"
     if channel_name.startswith("Support | "):

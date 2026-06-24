@@ -155,12 +155,19 @@ async def _cleanup_empty_lounge_rooms(guild):
         return
 
     skip_ids = {CREATE_CHANNEL_ID, VERIFICATION_1_ID, VERIFICATION_2_ID, BOT_VOICE_CHANNEL_ID}
-    lounge_suffix = "'s Lounge"
+    lounge_prefix = "🎙️|"
+    lounge_suffix = " ✓"
+    legacy_lounge_suffix = "'s Lounge"
 
     for voice_channel in hub.category.voice_channels:
         if voice_channel.id in skip_ids:
             continue
-        if not voice_channel.name.endswith(lounge_suffix):
+        name = voice_channel.name
+        is_lounge = (
+            (name.startswith(lounge_prefix) and name.endswith(lounge_suffix))
+            or name.endswith(legacy_lounge_suffix)
+        )
+        if not is_lounge:
             continue
         if voice_channel.members:
             owners[voice_channel.id] = _infer_lounge_owner(voice_channel)
@@ -369,7 +376,9 @@ async def on_voice_state_update(member, before, after):
             if r:
                 ow[r] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True)
         ow[member] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True, manage_channels=True)
-        new_vc = await guild.create_voice_channel(name=f"{member.name}'s Lounge", category=cat, overwrites=ow)
+        new_vc = await guild.create_voice_channel(
+            name=f"🎙️|{member.name} ✓", category=cat, overwrites=ow
+        )
         owners[new_vc.id] = member.id
         await member.move_to(new_vc)
         await new_vc.send(embed=discord.Embed(title="Your lounge", description=f"Welcome {member.mention}!"), view=ControlPanelView(new_vc))
