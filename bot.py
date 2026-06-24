@@ -129,7 +129,7 @@ intents.guilds = True
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, status=discord.Status.dnd)
 
 owners = {}
 room_kinds = {}
@@ -998,7 +998,6 @@ class ControlPanelView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    await bot.change_presence(status=discord.Status.dnd)
 
     await load_database_from_discord()
 
@@ -1031,7 +1030,13 @@ async def on_ready():
         except Exception as e:
             print(f"Guild init failed for {guild.name}: {e}")
 
+    await bot.change_presence(status=discord.Status.dnd)
     print("System online.")
+
+
+@bot.event
+async def on_resumed():
+    await bot.change_presence(status=discord.Status.dnd)
 
 
 @tasks.loop(minutes=1.0)

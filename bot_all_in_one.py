@@ -77,7 +77,7 @@ intents.guilds = True
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, status=discord.Status.dnd)
 owners = {}
 user_levels = {}
 DB_FILE = "levels_database.json"
@@ -237,7 +237,6 @@ class ControlPanelView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    await bot.change_presence(status=discord.Status.dnd)
     await load_database_from_discord()
     voice_channel = bot.get_channel(BOT_VOICE_CHANNEL_ID)
     if voice_channel:
@@ -246,6 +245,12 @@ async def on_ready():
         except Exception as e:
             print(f"Voice join failed: {e}")
     update_levels_task.start()
+    await bot.change_presence(status=discord.Status.dnd)
+
+
+@bot.event
+async def on_resumed():
+    await bot.change_presence(status=discord.Status.dnd)
 
 
 @tasks.loop(minutes=1.0)
