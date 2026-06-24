@@ -1398,6 +1398,25 @@ async def post_roles_cmd(ctx):
         pass
 
 
+@bot.command(name="post", aliases=["say", "echo"])
+@commands.has_permissions(manage_messages=True)
+async def post_cmd(ctx, *, message: str = None):
+    """Repost your message as the bot (deletes your command). Usage: !post Hello everyone"""
+    content = (message or "").strip()
+    has_attachments = bool(ctx.message.attachments)
+
+    if not content and not has_attachments:
+        return await ctx.send("Usage: `!post your message here`", delete_after=8)
+
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+    files = [await attachment.to_file() for attachment in ctx.message.attachments]
+    await ctx.send(content or None, files=files or None)
+
+
 @bot.event
 async def on_member_join(member):
     guild = member.guild
