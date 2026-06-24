@@ -1,244 +1,162 @@
-# Legends Tunisia Bot — Project Resume
+# Legends Tunisia Bot — Résumé des commandes
 
-Last updated: 2026-06-23
-
-Use this file to pick up where we left off.
-
----
-
-## Project overview
-
-Discord bot for the **Legends Tunisia** server. Main features:
-
-- Welcome cards with custom avatar overlay (`welcome_card.py`)
-- Join-to-create voice lounges, support rooms, and verification rooms
-- **Room control panel** (Lock, Unlock, Rename, Kick, Check Level) in voice channel chat
-- **Smart room lock** — room stays visible; whitelist blocks new joins; no replacement when someone leaves
-- Verification / staff alerts in voice
-- XP / leveling system with role rewards (lvl 10, 20, 30…)
-- Game role picker (multi-select menu)
-- Server default notifications → **Only @mentions** (admin command + auto on startup)
-- Data backup to a Discord channel (`levels_database.json`)
-- Bot stays connected 24/7 in bot voice channel + bot-chat keepalive
-
-**Entry point:** `bot.py`  
-**Legacy / alternate:** `bot_all_in_one.py`
+**Préfixe :** `!`  
+**Fichier principal :** `bot.py`  
+**Version téléphone (simplifiée) :** `bot_all_in_one.py`
 
 ---
 
-## Repository & branches
+## Commandes texte (`!`)
 
-| Item | Value |
-|------|--------|
-| GitHub | https://github.com/milihamda/Legends-Tunisisa.git |
-| Active / deploy branch | `main` |
-| Render branch | `main` (see `render.yaml`) |
-| GitHub accounts used | `milihamda` (repo owner), `ahmedmili` (contributor — fork/PR workflow if needed) |
-
----
-
-## Bot commands
-
-| Command | Who | What |
-|---------|-----|------|
-| `!level [@user]` | Everyone | Show voice XP / level |
-| `!panel` / `!controlpanel` | Room owner | Repost control panel in voice room chat |
-| `!mentionsonly` / `!setnotifications` | Admin (Manage Server) | Set server default notifications to @mentions only |
-| `!postroles` | Admin | Post game role picker menu |
-| `!testlevelup` | Admin | Preview level-up card |
-| `!testwelcome` | Admin | Preview welcome card |
-
-**Room panel buttons** (voice channel chat, owner only): Lock, Unlock, Rename, Kick, Check Level
+| Commande | Aliases | Qui peut l'utiliser | Description |
+|----------|---------|---------------------|-------------|
+| `!level` | — | Tout le monde | Affiche le niveau vocal et le temps passé en vocal. Sans mention → tes stats. Avec `@user` → stats de cette personne. |
+| `!panel` | `!controlpanel`, `!roompanel` | Propriétaire de la room | Reposte le panneau de contrôle dans le chat vocal de ta room. Tu dois être connecté à ta room bot-managed. |
+| `!clear` | `!clearchat`, `!purgechat`, `!purge` | Owner de la room **ou** Manage Messages | Supprime tous les messages du chat (texte ou chat vocal). Après un clear dans une room, utilise `!panel` pour remettre les boutons. |
+| `!setnotifications` | `!mentionsonly`, `!notifmentions` | **Manage Server** (admin) | Met les notifications par défaut du serveur sur **@mentions only**. N'affecte que les **nouveaux** membres — chacun doit aussi régler ses notifs manuellement. |
+| `!postroles` | — | **Manage Server** (admin) | Poste le menu de sélection des rôles jeux (Valorant, Fortnite, Minecraft, etc.). Les membres choisissent leurs jeux via un menu déroulant. |
+| `!testlevelup` | — | Admin / test | Prévisualise la carte de level-up. Exemple : `!testlevelup @user 2 3` |
+| `!testwelcome` | — | Admin / test | Envoie une carte de bienvenue test dans le channel welcome (sans qu'un membre rejoigne). |
 
 ---
 
-## Room lock behavior
+## Détail de chaque commande
 
-1. **Lock** — saves whitelist of members currently in the room + sets user limit
-2. Room **stays visible** (e.g. `5/5`)
-3. Unauthorized users are **disconnected** if they try to join
-4. When someone **leaves**, limit shrinks (e.g. `4/4`) — **no one can take their slot** until Unlock
-5. **Unlock** — clears whitelist, removes user limit, restores join permissions
+### `!level` [@membre]
+- Montre : **niveau actuel**, **temps vocal total (minutes)**, **minutes restantes** pour le prochain niveau.
+- Les bots n'ont pas de profil de level.
+- Le level monte automatiquement quand tu restes en vocal (voir section automatique).
 
----
+### `!panel` / `!controlpanel` / `!roompanel`
+- À utiliser **dans le chat de ta room vocale** temporaire.
+- Tu dois être le **owner** de la room.
+- Reposte l'embed + les boutons (Lock, Unlock, Rename, Kick, Transfer, Check Level).
+- Utile après un `!clear` qui a supprimé le panneau.
 
-## Notifications note
+### `!clear` / `!clearchat` / `!purgechat` / `!purge`
+- Efface le maximum de messages possible (limite Discord : messages de moins de 14 jours en bulk).
+- Dans une **room bot-managed** : seul l'**owner** peut clear (sauf si tu as Manage Messages).
+- Dans un channel normal : il faut **Manage Messages**.
+- Le bot doit aussi avoir **Manage Messages**.
 
-- `!mentionsonly` sets the **server default** (mainly affects new members)
-- Existing members must set manually: Server → Notification Settings → **Only @mentions**
-- Bot no longer deletes/reposts messages in voice room chat (silent relay removed)
+### `!setnotifications` / `!mentionsonly` / `!notifmentions`
+- Change le réglage serveur → notifications par défaut = **mentions seulement**.
+- Chaque membre doit encore configurer :
+  - Clic sur l'icône du serveur → Notification Settings → Only @mentions
+  - Clic droit sur la catégorie lounge → Notification Settings → Only @mentions
 
----
+### `!postroles`
+- Poste un embed **"Select your roles"** avec un menu multi-sélection.
+- Jeux configurés : Call of Duty, GTA V, Brawlhalla, CS GO, Fortnite, Valorant, League of Legends, Minecraft.
+- Le bot enlève les anciens rôles jeux et assigne ceux choisis.
 
-## Local setup
+### `!testlevelup` [@membre] [ancien_niveau] [nouveau_niveau]
+- Commande de **test** pour voir la carte image de level-up.
+- Exemple : `!testlevelup @Ahmed 5 6`
 
-```powershell
-cd "C:\Users\milih\OneDrive\Desktop\weld el 7ay\Legends-Tunisisa"
-pip install -r requirements.txt
-copy .env.example .env
-# Edit .env and set DISCORD_TOKEN
-python bot.py
-```
-
-**Never commit `.env`** — it is in `.gitignore`. Only `.env.example` goes to GitHub.
-
-### Optional env vars (`.env`)
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `DISCORD_TOKEN` | — | Required |
-| `BOT_CHAT_CHANNEL_ID` | backup channel ID | Bot-chat channel |
-| `BOT_CHAT_MESSAGE` | `welcome to Bot-Chat` | One-time welcome in bot-chat |
-| `SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS` | `true` | Auto-set server default on startup |
+### `!testwelcome` [@membre]
+- Commande de **test** pour la carte de bienvenue personnalisée (avatar + nom sur fond).
 
 ---
 
-## Docker (local test)
+## Boutons du panneau vocal (Control Panel)
 
-Requires **Docker Desktop running**.
+Quand tu rejoins un channel **Join-to-Create**, le bot crée ta room et envoie ce panneau. **Seul l'owner** peut utiliser les boutons de gestion.
 
-```powershell
-docker compose build
-docker compose up
-```
-
-Health check: http://localhost:8080 → `Legends Tunisia bot is running`
-
-Stop local `python bot.py` before running Docker or Render — **one token = one bot instance**.
-
----
-
-## Render deployment
-
-| Item | Value |
-|------|--------|
-| URL | https://legends-tunisia.onrender.com |
-| Service | Web Service (Docker runtime) |
-| Branch | `main` |
-| Env var | `DISCORD_TOKEN` (set in Render dashboard, not in repo) |
-| Config file | `render.yaml` |
-
-### Render checklist
-
-- [x] **Runtime:** Docker
-- [x] **Branch:** `main`
-- [ ] **Environment:** `DISCORD_TOKEN` set
-- [ ] Stop local bot while Render is live
-- [ ] After push: wait for deploy **Live** before testing Discord
-
-### Deploy
-
-```powershell
-git add .
-git commit -m "your message"
-git push origin main
-```
-
-Render auto-deploys from `main`.
+| Bouton | Action |
+|--------|--------|
+| **Lock** 🔒 | Verrouille la room : seules les personnes **déjà dedans** peuvent rester. Personne d'autre ne peut rejoindre. |
+| **Unlock** 🔓 | Déverrouille — les autres peuvent rejoindre à nouveau. |
+| **Rename** 📝 | Ouvre un formulaire pour changer le nom de la room (max 30 caractères). |
+| **Kick** 👞 | Menu pour choisir un membre et le **déconnecter** du vocal. |
+| **Transfer** 👑 | Transfère la propriété de la room à un autre membre présent dans le vocal. |
+| **Check Level** 📊 | Affiche ton niveau vocal, temps en minutes, et progression (message privé éphémère). |
 
 ---
 
-## Deploy history / fixes applied
+## Menu rôles jeux (après `!postroles`)
 
-1. **Push protection** — `.env` removed from git history; `.gitignore` added
-2. **Render health server** — `HTTPServer` on `PORT` (commit `7387040`)
-3. **HEAD health check** — UptimeRobot support (`93b5762`)
-4. **Game role picker** — defer + single `member.edit(roles=...)`
-5. **@mentions notifications** — `!setnotifications` + auto on startup (`e53c0f2`)
-6. **Bot-chat spam fix** — stop re-sending message every minute (`3b512fb`)
-7. **Render branch** — deploy from `main` instead of `first_commit`
-8. **Room control panel** — permissions for bot, `!panel`, unique button IDs (`fa1d05d`)
-9. **Room lock visibility** — user limit instead of permission-based lock (`8a88dbd`)
-10. **Voice chat messages** — removed silent relay that deleted user messages (`2de51e8`)
-11. **Lock whitelist** — no replacement when member leaves (`9f232d1`)
-
-### Latest commit
-
-```
-9f232d1 Fix lock: no replacement when member leaves
-```
+| Action | Description |
+|--------|-------------|
+| Sélection multiple | Choisis un ou plusieurs jeux dans le menu déroulant. |
+| Mise à jour auto | Le bot retire les anciens rôles jeux et ajoute les nouveaux. |
+| Désélection totale | Si tu ne sélectionnes rien → tous les rôles jeux sont retirés. |
 
 ---
 
-## Key files
+## Fonctionnalités automatiques (sans commande)
 
-| File | Purpose |
-|------|---------|
-| `bot.py` | Main bot logic (~1100 lines) |
-| `welcome_card.py` | Welcome image generation (Pillow) |
-| `level_up_card.py` | Level-up card image |
-| `levels_database.json` | XP/level data (local; also backed up to Discord) |
-| `Dockerfile` | Render / Docker build |
-| `docker-compose.yml` | Local Docker run |
-| `render.yaml` | Render Blueprint config |
-| `.env.example` | Template for env vars |
+### Join-to-Create (rooms temporaires)
+En rejoignant l'un de ces channels vocaux, le bot crée une **sous-room privée** :
 
----
+| Channel trigger | Room créée | Accès |
+|-----------------|------------|-------|
+| **Create Lounge** | `{pseudo}'s Lounge` | Boy + Girl roles + owner |
+| **Support** | `Support \| {pseudo}` | Staff + owner |
+| **Verification 1 / 2** | `Verify \| {pseudo}` | Staff + owner |
 
-## Bot permissions required
+- La room est **supprimée automatiquement** quand tout le monde la quitte.
+- Si l'owner quitte mais d'autres restent → après **60 secondes**, l'ownership passe **aléatoirement** à quelqu'un d'autre dans la room.
 
-Move bot role **above** Boy/Girl roles. Needs at minimum:
+### Bienvenue (`on_member_join`)
+- Donne le rôle **Not Verified** au nouveau membre.
+- Envoie une **carte image de bienvenue** dans le channel welcome.
 
-- Manage Channels
-- Manage Server (for notification default)
-- Send Messages / Read Message History (voice + text)
-- Move Members (kick from voice)
-- Connect (stay in bot voice channel)
+### Vérification vocale
+- Si un membre **Not Verified** entre dans Verification 1 ou 2 → **DM aux staff** avec alerte.
 
----
+### Support vocal
+- Si un membre normal (pas staff/support) rejoint le channel Support → **notification aux rôles staff**.
 
-## Known limitations & TODO
+### Système de levels vocal
+- **+1 minute** de temps vocal chaque minute où tu es en vocal actif (pas self-deaf, pas bot).
+- Ne compte **pas** dans : Create channel, Support hub, Verification hubs, channel bot statique.
+- Level-up annoncé dans **#level-log** avec carte image.
+- Rôles auto assignés actuellement : **Lv 10**, **Lv 20**, **Lv 30+** (rôles Lv 40–100 configurés mais pas encore branchés dans le code).
+- Formule : Lv1 = 5 min, puis +10, +15, +20 min… entre chaque level.
+- Backup auto des données dans un channel Discord + fichier `levels_database.json`.
 
-### Done recently
-- [x] Deploy branch unified on `main`
-- [x] Room control panel in voice chat
-- [x] Room lock (visible + whitelist, no slot replacement)
-- [x] Stop deleting voice room chat messages
-- [x] Notification commands + auto server default
-- [x] Bot-chat keepalive without minute spam
+### Bot statique
+- Le bot reste connecté en **muet/sourd** dans son channel vocal fixe.
+- Status : **Do Not Disturb** (rouge).
+- Message de bienvenue maintenu dans le **Bot-Chat** channel.
 
-### Still to verify
-- [ ] Confirm latest deploy (`9f232d1`) is Live on Render after each push
-- [ ] Test lock with 3+ users: lock → one leaves → confirm no one else can join
-
-### Future improvements (optional)
-- [ ] Switch Render to **Background Worker** — no HTTP port needed
-- [ ] Persistent storage for `levels_database.json` (Render disk or external DB)
-- [ ] Restore `owners` dict after bot restart (for kick/lock owner check on old rooms)
-- [ ] Rotate Discord token if it was ever exposed in old commits
-- [ ] Fix typo in repo name: `Legends-Tunisisa` vs `Legends-Tunisia`
+### Au démarrage
+- Charge la base de levels (local ou backup Discord).
+- Ré-enregistre les panneaux des rooms existantes.
+- Applique les notifications @mentions (si activé dans `.env`).
+- Health check HTTP sur le port `PORT` (pour Render/hosting).
 
 ---
 
-## Troubleshooting
+## Version `bot_all_in_one.py` (Pydroid / téléphone)
 
-| Problem | Cause | Fix |
-|---------|--------|-----|
-| Control panel not showing | Bot lacked Send Messages on new private room | Fixed in `fa1d05d`; use `!panel` if missing |
-| Panel in wrong place | It's in **voice channel chat** (💬), not a text channel | Open chat while in the voice room |
-| Lock hides room | Old permission-based lock | Fixed with user limit + whitelist (`8a88dbd`, `9f232d1`) |
-| Someone joins after lock + leave | Old user_limit-only lock | Push `9f232d1`; whitelist kicks unauthorized joins |
-| Bot deletes chat messages | Silent lounge relay (removed) | Push `2de51e8` |
-| `!mentionsonly` but still notified | Server default ≠ your personal settings | Set **Only @mentions** manually on your account |
-| Command does nothing | Code not deployed | `git push origin main` → wait Render Live |
-| Rate limit 429 | Two bot instances | Run only Render **or** local |
-| Levels reset on Render | Ephemeral filesystem | Discord backup channel restores on startup |
-| `git push` fails | No upstream | `git push --set-upstream origin main` |
+Version **réduite** pour tourner sur téléphone. Commandes disponibles :
+
+| Commande | Description |
+|----------|-------------|
+| `!level` | Affiche level + XP (système simplifié : +10 XP/min, level = XP ÷ 150). |
+
+**Pas inclus** dans la version all-in-one : `!panel`, `!clear`, `!postroles`, `!setnotifications`, Transfer, Support rooms, cartes level-up avancées, rôles jeux.
+
+Boutons du panneau (version simple) : Lock, Unlock, Rename, Kick, Level — **sans** Transfer.
 
 ---
 
-## Contacts / config notes
+## Permissions requises pour le bot
 
-- Bot logs in as **WeldEl7ay#0014** (name may vary)
-- Guild / channel / role IDs hardcoded at top of `bot.py`
-- Game roles in `GAME_ROLES` list in `bot.py`
-- Join-to-create hubs: Lounge, Support, Verify ×2 (see `JOIN_TO_CREATE_CHANNELS`)
+- Manage Channels, Manage Messages, Move Members  
+- Manage Roles (rôles jeux + levels + Not Verified)  
+- Manage Server (pour `!setnotifications`)  
+- Le rôle du bot doit être **au-dessus** des rôles qu'il assigne.
 
 ---
 
-## Next session — start here
+## Variables d'environnement (`.env`)
 
-1. `git log -1 --oneline` — confirm latest commit matches Render deploy
-2. https://legends-tunisia.onrender.com — health check
-3. Test: create lounge → panel → lock → member leaves → try join (should fail)
-4. Test: voice chat message stays (not deleted)
+| Variable | Rôle |
+|----------|------|
+| `DISCORD_TOKEN` | Token du bot (obligatoire) |
+| `BOT_CHAT_CHANNEL_ID` | Channel du message bot-chat |
+| `BOT_CHAT_MESSAGE` | Texte du message bot-chat |
+| `SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS` | `true` = auto @mentions au démarrage |

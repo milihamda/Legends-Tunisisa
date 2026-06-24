@@ -148,7 +148,37 @@ async def save_database_to_discord():
         print(f"Cloud backup failed: {e}")
 
 
-class KickUserSelect(discord.ui.Select):
+async def _cleanup_empty_lounge_rooms(guild):
+    """On startup: delete empty lounge rooms left from before a restart."""
+    hub = guild.get_channel(CREATE_CHANNEL_ID)
+    if not hub or not hub.category:
+        return
+
+    skip_ids = {CREATE_CHANNEL_ID, VERIFICATION_1_ID, VERIFICATION_2_ID, BOT_VOICE_CHANNEL_ID}
+    lounge_suffix = "'s Lounge"
+
+    for voice_channel in hub.category.voice_channels:
+        if voice_channel.id in skip_ids:
+            continue
+        if not voice_channel.name.endswith(lounge_suffix):
+            continue
+        if voice_channel.members:
+            owners[voice_channel.id] = _infer_lounge_owner(voice_channel)
+            continue
+        owners.pop(voice_channel.id, None)
+        try:
+            await voice_channel.delete(reason="Empty lounge cleanup after bot restart")
+            print(f"Deleted empty lounge: {voice_channel.name}")
+        except discord.Exception as e:
+            print(f"Failed to delete {voice_channel.name}: {e}")
+
+
+def _infer_lounge_owner(channel):
+    for target, overwrite in channel.overwrites.items():
+        if isinstance(target, discord.Member) and not target.bot and overwrite.manage_channels:
+            return target.id
+    humans = [m for m in channel.members if not m.bot]
+    return humans[0].id if humans else None
     def __init__(self, channel):
         self.channel = channel
         options = [
@@ -238,6 +268,8 @@ class ControlPanelView(discord.ui.View):
 async def on_ready():
     print(f"Logged in as {bot.user}")
     await load_database_from_discord()
+    for guild in bot.guilds:
+        await _cleanup_empty_lounge_rooms(guild)
     voice_channel = bot.get_channel(BOT_VOICE_CHANNEL_ID)
     if voice_channel:
         try:
@@ -343,8 +375,11 @@ async def on_voice_state_update(member, before, after):
         await new_vc.send(embed=discord.Embed(title="Your lounge", description=f"Welcome {member.mention}!"), view=ControlPanelView(new_vc))
 
     if before.channel and before.channel.id in owners and not before.channel.members:
-        owners.pop(before.channel.id)
-        await before.channel.delete()
+        owners.pop(before.channel.id, None)
+        try:
+            await before.channel.delete(reason="Empty lounge cleanup")
+        except discord.HTTPException:
+            pass
 
 
 if TOKEN == "YOUR_BOT_TOKEN_HERE":

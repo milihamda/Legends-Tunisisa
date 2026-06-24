@@ -523,23 +523,86 @@ async def _refresh_bot_chat_welcome_message(guild):
     bot_chat_messages[guild.id] = message.id
 
 
-def _register_existing_lounge_rooms(guild):
-    """Restore lounge tracking after bot restart (rooms still exist in Discord)."""
-    lounge_suffix = "'s Lounge"
-    hub_ids = set(JOIN_TO_CREATE_CHANNELS.keys())
+_JOIN_TO_CREATE_HUB_IDS = frozenset(JOIN_TO_CREATE_CHANNELS.keys())
 
-    for hub_id, config in JOIN_TO_CREATE_CHANNELS.items():
-        if config["kind"] != "lounge":
-            continue
+
+def _temp_room_kind_from_name(channel_name: str) -> str | None:
+    if channel_name.endswith("'s Lounge"):
+        return "lounge"
+    if channel_name.startswith("Support | "):
+        return "support"
+    if channel_name.startswith("Verify | "):
+        return "verification"
+    return None
+
+
+def _is_tracked_temp_room(channel_id: int) -> bool:
+    return channel_id in owners or channel_id in room_kinds
+
+
+def _clear_temp_room_tracking(channel_id: int):
+    _cancel_owner_transfer(channel_id)
+    owners.pop(channel_id, None)
+    room_kinds.pop(channel_id, None)
+    locked_rooms.discard(channel_id)
+    locked_room_members.pop(channel_id, None)
+
+
+def _infer_room_owner(channel: discord.VoiceChannel) -> discord.Member | None:
+    for target, overwrite in channel.overwrites.items():
+        if isinstance(target, discord.Member) and not target.bot and overwrite.manage_channels:
+            return target
+    humans = [m for m in channel.members if not m.bot]
+    return humans[0] if humans else None
+
+
+async def _delete_temp_voice_channel(channel: discord.VoiceChannel, *, reason: str):
+    channel_id = channel.id
+    _clear_temp_room_tracking(channel_id)
+    try:
+        await channel.delete(reason=reason)
+    except discord.HTTPException as exc:
+        print(f"Failed to delete temp room {channel.name}: {exc.text}")
+
+
+async def _cleanup_and_register_temp_rooms(guild):
+    """On startup: delete empty temp voice rooms; re-track occupied ones."""
+    skip_ids = _JOIN_TO_CREATE_HUB_IDS | {BOT_VOICE_CHANNEL_ID}
+    scanned_categories = set()
+
+    for hub_id in _JOIN_TO_CREATE_HUB_IDS:
         hub = guild.get_channel(hub_id)
         if not hub or not hub.category:
             continue
+        category = hub.category
+        if category.id in scanned_categories:
+            continue
+        scanned_categories.add(category.id)
 
-        for voice_channel in hub.category.voice_channels:
-            if voice_channel.id in hub_ids:
+        for voice_channel in category.voice_channels:
+            if voice_channel.id in skip_ids:
                 continue
-            if voice_channel.name.endswith(lounge_suffix):
-                room_kinds[voice_channel.id] = "lounge"
+
+            kind = _temp_room_kind_from_name(voice_channel.name)
+            if kind is None:
+                continue
+
+            if len(voice_channel.members) == 0:
+                await _delete_temp_voice_channel(
+                    voice_channel,
+                    reason="Empty temp voice room cleanup after bot restart",
+                )
+                print(f"Deleted empty temp room: {voice_channel.name}")
+                continue
+
+            owner = _infer_room_owner(voice_channel)
+            if owner:
+                owners[voice_channel.id] = owner.id
+            room_kinds[voice_channel.id] = kind
+            print(
+                f"Re-registered temp room: {voice_channel.name} "
+                f"(kind={kind}, owner={owner.display_name if owner else 'unknown'})"
+            )
 
 
 # Game roles — replace role_id with real Discord role IDs (Developer mode → copy ID)
@@ -1016,7 +1079,7 @@ async def on_ready():
     for guild in bot.guilds:
         try:
             await guild.chunk()
-            _register_existing_lounge_rooms(guild)
+            await _cleanup_and_register_temp_rooms(guild)
             for channel_id in list(room_kinds.keys()):
                 ch = guild.get_channel(channel_id)
                 emojis = _get_panel_emojis(guild) if ch else PANEL_EMOJI_FALLBACKS
@@ -1442,13 +1505,15 @@ async def on_voice_state_update(member, before, after):
         except discord.HTTPException:
             pass
 
-    if before.channel and before.channel.id in owners and len(before.channel.members) == 0:
-        _cancel_owner_transfer(before.channel.id)
-        owners.pop(before.channel.id, None)
-        room_kinds.pop(before.channel.id, None)
-        locked_rooms.discard(before.channel.id)
-        locked_room_members.pop(before.channel.id, None)
-        await before.channel.delete()
+    if (
+        before.channel
+        and _is_tracked_temp_room(before.channel.id)
+        and len(before.channel.members) == 0
+    ):
+        await _delete_temp_voice_channel(
+            before.channel,
+            reason="Empty temp voice room cleanup",
+        )
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
