@@ -1736,9 +1736,9 @@ async def _send_to_punishment_log(channel, content: str, image_file: discord.Fil
     if isinstance(channel, discord.ForumChannel):
         title = content.replace("New Punishment: ", "Punishment: ", 1)
         title = title[:100] if len(title) <= 100 else title[:97] + "..."
-        return await channel.create_thread(name=title, content=content, file=image_file)
+        return await channel.create_thread(name=title, content=content, files=[image_file])
 
-    return await channel.send(content=content, file=image_file)
+    return await channel.send(content=content, files=[image_file])
 
 
 async def _finish_staff_command(ctx, posted: bool, log_channel=None):
@@ -1811,6 +1811,10 @@ async def _post_punishment_card(
         print(f"Punishment post failed in {log_channel.id}: {exc.text}")
         await _finish_staff_command(ctx, False, log_channel)
         return False
+    except Exception as exc:
+        print(f"Punishment post unexpected error in {log_channel.id}: {exc}")
+        await ctx.send(f"Punishment post failed: {exc}", delete_after=12)
+        return False
 
     await _finish_staff_command(ctx, True, log_channel)
     return True
@@ -1837,7 +1841,7 @@ async def ban_cmd(ctx, member: discord.Member, *, reason: str = "No reason provi
         return await ctx.send("You cannot punish this member.", delete_after=8)
 
     try:
-        await member.ban(reason=f"{ctx.author}: {reason}", delete_message_days=0)
+        await member.ban(reason=f"{ctx.author}: {reason}", delete_message_seconds=0)
     except discord.Forbidden:
         return await ctx.send("I cannot ban this member.", delete_after=8)
     except discord.HTTPException as exc:
@@ -1949,7 +1953,7 @@ async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason prov
     if count >= MAX_WARNS_BEFORE_BAN:
         ban_reason = f"Automatic ban — {MAX_WARNS_BEFORE_BAN} warnings reached. Last: {reason}"
         try:
-            await member.ban(reason=f"{ctx.author}: {ban_reason}", delete_message_days=0)
+            await member.ban(reason=f"{ctx.author}: {ban_reason}", delete_message_seconds=0)
         except discord.Forbidden:
             log_channel = await _get_punishment_log_channel(ctx.guild)
             if log_channel:
@@ -1961,6 +1965,9 @@ async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason prov
             log_channel = await _get_punishment_log_channel(ctx.guild)
             if log_channel:
                 await log_channel.send(f"Auto-ban failed for {member.mention}: {exc.text}")
+        except Exception as exc:
+            await ctx.send(f"Auto-ban failed: {exc}", delete_after=12)
+            print(f"Auto-ban unexpected error: {exc}")
         else:
             await _post_punishment_card(ctx, "ban", member, ban_reason)
             _clear_warnings(member.id)
@@ -2043,17 +2050,33 @@ async def test_punishment_cmd(
 
 @bot.event
 async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandInvokeError):
+        error = error.original
+
+    if isinstance(error, commands.BotMissingPermissions):
+        missing = ", ".join(f"**{p.replace('_', ' ').title()}**" for p in error.missing_permissions)
+        return await ctx.send(f"I need these permissions: {missing}", delete_after=12)
+
+    if isinstance(error, commands.MissingPermissions):
+        missing = ", ".join(f"**{p.replace('_', ' ').title()}**" for p in error.missing_permissions)
+        return await ctx.send(f"You need: {missing}", delete_after=12)
+
     if isinstance(error, commands.CheckFailure):
         return
+
     if isinstance(error, commands.MissingRequiredArgument):
-        return await ctx.send(f"Missing argument. Usage: `{ctx.command.signature}`", delete_after=10)
+        usage = ctx.command.signature if ctx.command else "?"
+        return await ctx.send(f"Missing argument. Usage: `{ctx.prefix}{ctx.command.name} {usage}`", delete_after=10)
+
     if isinstance(error, commands.MemberNotFound):
         return await ctx.send("Member not found. Mention a valid user.", delete_after=8)
+
     if isinstance(error, commands.BadArgument):
         return await ctx.send("Invalid command usage.", delete_after=8)
-    print(f"Command error in {ctx.command}: {error}")
+
+    print(f"Command error in {getattr(ctx.command, 'name', '?')}: {type(error).__name__}: {error}")
     try:
-        await ctx.send("Something went wrong running that command.", delete_after=8)
+        await ctx.send(f"Command failed: `{type(error).__name__}: {error}`", delete_after=15)
     except discord.HTTPException:
         pass
 
