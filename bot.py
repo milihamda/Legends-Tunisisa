@@ -1727,11 +1727,20 @@ async def _get_punishment_log_channel(guild: discord.Guild | None = None):
 
 
 async def _send_to_punishment_log(channel, content: str, image_file: discord.File):
+    embed = discord.Embed(description=content, color=discord.Color.dark_red())
+    embed.set_image(url="attachment://punishment.png")
+
     if isinstance(channel, discord.ForumChannel):
         title = content.replace("New Punishment: ", "Punishment: ", 1)
         title = title[:100] if len(title) <= 100 else title[:97] + "..."
-        return await channel.create_thread(name=title, content=content, file=image_file)
-    return await channel.send(content=content, file=image_file)
+        thread = await channel.create_thread(
+            name=title,
+            embed=embed,
+            file=image_file,
+        )
+        return thread
+
+    return await channel.send(embed=embed, file=image_file)
 
 
 async def _post_punishment_card(
@@ -1785,8 +1794,6 @@ async def _post_punishment_card(
         print(f"Punishment post failed in {log_channel.id}: {exc.text}")
         return False
 
-    if log_channel.id != ctx.channel.id:
-        await ctx.send(f"Punishment logged in {log_channel.mention}.", delete_after=5)
     return True
 
 
