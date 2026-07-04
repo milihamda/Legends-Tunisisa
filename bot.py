@@ -3,8 +3,11 @@ import json
 import math
 import os
 import random
+import re
 import threading
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 import discord
 from discord.ext import commands, tasks
@@ -12,6 +15,7 @@ from dotenv import load_dotenv
 
 from welcome_card import build_welcome_card, AVATAR_SIZE, AVATAR_POSITION, FONT_SIZE
 from level_up_card import build_level_up_card
+from punishment_card import LABELS as PUNISHMENT_LABELS, build_punishment_card
 
 load_dotenv()
 
@@ -52,6 +56,7 @@ STAFF_ROLE_IDS = [
 ]
 
 LEVEL_LOG_CHANNEL_ID = 1517921554510385242
+PUNISHMENT_LOG_CHANNEL_ID = int(os.getenv("PUNISHMENT_LOG_CHANNEL_ID", "1522676265381793876"))
 
 DATA_BACKUP_CHANNEL_ID = 1518023858765168771
 BOT_VOICE_CHANNEL_ID = 1518025649225470072
@@ -112,6 +117,30 @@ def _get_user_level_data(user_id: int) -> dict:
     return _normalize_user_level_data(user_levels.get(user_id, {}))
 
 
+def _iter_level_voice_channels(guild: discord.Guild):
+    """Voice + stage channels where voice time can count."""
+    excluded = {
+        CREATE_CHANNEL_ID,
+        SUPPORT_CHANNEL_ID,
+        VERIFICATION_1_ID,
+        VERIFICATION_2_ID,
+        BOT_VOICE_CHANNEL_ID,
+    }
+    for channel in (*guild.voice_channels, *guild.stage_channels):
+        if channel.id in excluded or not channel.members:
+            continue
+        yield channel
+
+
+def _start_background_tasks():
+    if not update_levels_task.is_running():
+        update_levels_task.start()
+    if not bot_chat_keepalive_task.is_running():
+        bot_chat_keepalive_task.start()
+    if not empty_temp_rooms_cleanup_task.is_running():
+        empty_temp_rooms_cleanup_task.start()
+
+
 def _format_level_stats(user_data: dict) -> str:
     level = user_data["level"]
     minutes = user_data["voice_minutes"]
@@ -138,8 +167,13 @@ OWNER_ABSENCE_SECONDS = 60
 locked_rooms = set()
 locked_room_members = {}
 user_levels = {}
-DB_FILE = "levels_database.json"
+DATA_DIR = Path("data")
+DB_FILE = str(DATA_DIR / "levels_database.json")
+LEGACY_DB_FILE = "levels_database.json"
 bot_chat_messages = {}
+WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
+user_warnings: dict[int, int] = {}
+MAX_WARNS_BEFORE_BAN = 3
 
 LOUNGE_ROOM_NAME_PREFIX = "🎙️|"
 LOUNGE_ROOM_NAME_SUFFIX = " ✓"
@@ -800,66 +834,178 @@ class DummyVoiceClient(discord.VoiceProtocol):
         pass
 
 
+def _levels_data_score(data: dict) -> int:
+    return sum(entry.get("voice_minutes", 0) for entry in data.values())
+
+
+def _normalize_levels_payload(raw: dict) -> dict:
+    return {int(k): _normalize_user_level_data(v) for k, v in raw.items()}
+
+
+def _read_levels_file(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return _normalize_levels_payload(json.load(f))
+    except Exception as e:
+        print(f"Could not read {path}: {e}")
+        return {}
+
+
+def _migrate_legacy_db_if_needed():
+    legacy = Path(LEGACY_DB_FILE)
+    target = Path(DB_FILE)
+    if legacy.is_file() and not target.exists():
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        legacy.replace(target)
+        print(f"Migrated {LEGACY_DB_FILE} -> {DB_FILE}")
+
+
+def _save_local_database_sync() -> bool:
+    if not user_levels:
+        return False
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        formatted_data = {str(k): v for k, v in user_levels.items()}
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(formatted_data, f, ensure_ascii=False, indent=4)
+        return True
+    except Exception as e:
+        print(f"Local level save failed: {e}")
+        return False
+
+
+def _pick_best_levels_data(*datasets: dict) -> dict:
+    best: dict = {}
+    best_score = -1
+    for data in datasets:
+        if not data:
+            continue
+        score = _levels_data_score(data)
+        if score > best_score:
+            best = data
+            best_score = score
+    return best
+
+
+async def _read_levels_from_discord_backup() -> dict:
+    channel = bot.get_channel(DATA_BACKUP_CHANNEL_ID)
+    if not channel:
+        return {}
+
+    try:
+        async for message in channel.history(limit=10):
+            if message.author == bot.user and message.content.startswith("```json"):
+                clean_content = message.content.strip("```json").strip("```")
+                return _normalize_levels_payload(json.loads(clean_content))
+    except Exception as e:
+        print(f"Error loading cloud db: {e}")
+    return {}
+
+
 async def load_database_from_discord():
     global user_levels
     await bot.wait_until_ready()
-    channel = bot.get_channel(DATA_BACKUP_CHANNEL_ID)
 
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                user_levels = {
-                    int(k): _normalize_user_level_data(v) for k, v in data.items()
-                }
-                print("Loaded from local JSON file.")
-                return
-        except Exception:
-            pass
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_db_if_needed()
 
-    if channel:
-        try:
-            async for message in channel.history(limit=5):
-                if message.author == bot.user and message.content.startswith("```json"):
-                    clean_content = message.content.strip("```json").strip("```")
-                    data = json.loads(clean_content)
-                    user_levels = {
-                        int(k): _normalize_user_level_data(v) for k, v in data.items()
-                    }
-                    print("Restored levels from Discord backup channel.")
-                    with open(DB_FILE, "w", encoding="utf-8") as f:
-                        json.dump(user_levels, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            print(f"Error loading cloud db: {e}")
+    local_data = _read_levels_file(DB_FILE)
+    discord_data = await _read_levels_from_discord_backup()
+    user_levels = _pick_best_levels_data(local_data, discord_data)
+
+    if user_levels:
+        _save_local_database_sync()
+        source = "local file" if _levels_data_score(local_data) >= _levels_data_score(discord_data) else "Discord backup"
+        print(f"Loaded {len(user_levels)} user levels from {source}.")
+    else:
+        print("No level data found — starting fresh.")
 
 
 async def save_database_to_discord():
     if not user_levels:
         return
+    if not _save_local_database_sync():
+        return
+
+    channel = bot.get_channel(DATA_BACKUP_CHANNEL_ID)
+    if not channel:
+        return
+
     try:
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(user_levels, f, ensure_ascii=False, indent=4)
-
-        channel = bot.get_channel(DATA_BACKUP_CHANNEL_ID)
-        if channel:
-            try:
-                await channel.purge(limit=10, check=lambda m: m.author == bot.user)
-            except Exception:
-                pass
-
-            formatted_data = {str(k): v for k, v in user_levels.items()}
-            json_string = json.dumps(formatted_data, ensure_ascii=False, indent=2)
-
-            await channel.send(
-                content=f"```json\n{json_string}\n```",
-                embed=discord.Embed(
-                    title="AUTOMATIC DATA BACKUP SECURED",
-                    description="Automated backup for server voice levels.\n**DO NOT DELETE THIS MESSAGE.**",
-                    color=discord.Color.green(),
-                ),
+        formatted_data = {str(k): v for k, v in user_levels.items()}
+        json_string = json.dumps(formatted_data, ensure_ascii=False, indent=2)
+        backup_message = await channel.send(
+            content=f"```json\n{json_string}\n```",
+            embed=discord.Embed(
+                title="AUTOMATIC DATA BACKUP SECURED",
+                description="Automated backup for server voice levels.\n**DO NOT DELETE THIS MESSAGE.**",
+                color=discord.Color.green(),
+            ),
+        )
+        try:
+            await channel.purge(
+                limit=10,
+                check=lambda m: m.author == bot.user and m.id != backup_message.id,
             )
+        except Exception:
+            pass
     except Exception as e:
         print(f"Cloud backup failed: {e}")
+
+
+def _load_warnings() -> None:
+    global user_warnings
+    if not os.path.exists(WARNINGS_FILE):
+        user_warnings = {}
+        return
+    try:
+        with open(WARNINGS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        user_warnings = {int(k): int(v) for k, v in raw.items()}
+        print(f"Loaded {len(user_warnings)} warning records.")
+    except Exception as e:
+        print(f"Could not load warnings database: {e}")
+        user_warnings = {}
+
+
+def _save_warnings() -> bool:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(WARNINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in user_warnings.items()}, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Warnings save failed: {e}")
+        return False
+
+
+def _get_warning_count(user_id: int) -> int:
+    return user_warnings.get(user_id, 0)
+
+
+def _add_warning(user_id: int) -> int:
+    count = user_warnings.get(user_id, 0) + 1
+    user_warnings[user_id] = count
+    _save_warnings()
+    return count
+
+
+def _clear_warnings(user_id: int) -> None:
+    if user_id in user_warnings:
+        del user_warnings[user_id]
+        _save_warnings()
+
+
+def _remove_warning(user_id: int) -> int:
+    count = user_warnings.get(user_id, 0)
+    if count <= 1:
+        user_warnings.pop(user_id, None)
+    else:
+        user_warnings[user_id] = count - 1
+    _save_warnings()
+    return user_warnings.get(user_id, 0)
 
 
 class KickUserSelect(discord.ui.Select):
@@ -1116,6 +1262,7 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
     await load_database_from_discord()
+    _load_warnings()
 
     voice_channel = bot.get_channel(BOT_VOICE_CHANNEL_ID)
     if voice_channel:
@@ -1125,9 +1272,7 @@ async def on_ready():
         except Exception as e:
             print(f"Failed to join static channel: {e}")
 
-    update_levels_task.start()
-    bot_chat_keepalive_task.start()
-    empty_temp_rooms_cleanup_task.start()
+    _start_background_tasks()
     bot.add_view(GameRolePickerView())
 
     for guild in bot.guilds:
@@ -1187,77 +1332,83 @@ async def before_empty_temp_rooms_cleanup_task():
     await bot.wait_until_ready()
 
 
+@update_levels_task.before_loop
+async def before_update_levels_task():
+    await bot.wait_until_ready()
+
+
+@update_levels_task.error
+async def update_levels_task_error(error):
+    print(f"update_levels_task crashed: {error}")
+
+
 @tasks.loop(minutes=1.0)
 async def update_levels_task():
     data_changed = False
     for guild in bot.guilds:
         log_channel = guild.get_channel(LEVEL_LOG_CHANNEL_ID)
-        for voice_channel in guild.voice_channels:
-            if voice_channel.id in [
-                CREATE_CHANNEL_ID,
-                SUPPORT_CHANNEL_ID,
-                VERIFICATION_1_ID,
-                VERIFICATION_2_ID,
-                BOT_VOICE_CHANNEL_ID,
-            ] or len(voice_channel.members) == 0:
-                continue
-
+        for voice_channel in _iter_level_voice_channels(guild):
             for member in voice_channel.members:
-                if member.bot or member.voice.self_deaf:
+                if member.bot:
+                    continue
+                voice = member.voice
+                if voice is None or voice.self_deaf:
                     continue
 
-                user_id = member.id
-                user_data = _get_user_level_data(user_id)
-                old_lvl = user_data["level"]
-                user_data["voice_minutes"] += 1
-                new_calculated_level = level_from_voice_minutes(user_data["voice_minutes"])
-                user_data["level"] = new_calculated_level
-                user_levels[user_id] = user_data
+                try:
+                    user_id = member.id
+                    user_data = _get_user_level_data(user_id)
+                    old_lvl = user_data["level"]
+                    user_data["voice_minutes"] += 1
+                    new_calculated_level = level_from_voice_minutes(user_data["voice_minutes"])
+                    user_data["level"] = new_calculated_level
+                    user_levels[user_id] = user_data
+                    data_changed = True
 
-                data_changed = True
+                    if new_calculated_level > old_lvl:
+                        current_lvl = new_calculated_level
 
-                if new_calculated_level > old_lvl:
-                    current_lvl = new_calculated_level
+                        if log_channel:
+                            try:
+                                buffer = await build_level_up_card(member, old_lvl, current_lvl)
+                                image_file = discord.File(buffer, filename="level_up.png")
+                                embed_lvl = discord.Embed(
+                                    title="LEVEL UP!",
+                                    description=(
+                                        f"{member.mention} reached **Level {current_lvl}**.\n"
+                                        f"*Voice Time: {user_data['voice_minutes']} min*"
+                                    ),
+                                    color=discord.Color.from_rgb(231, 76, 60),
+                                )
+                                embed_lvl.set_image(url="attachment://level_up.png")
+                                await log_channel.send(file=image_file, embed=embed_lvl)
+                            except Exception as e:
+                                print(f"Level up card failed: {e}")
+                                embed_lvl = discord.Embed(
+                                    title="LEVEL UP!",
+                                    description=(
+                                        f"{member.mention} reached **Level {current_lvl}**.\n"
+                                        f"*Voice Time: {user_data['voice_minutes']} min*"
+                                    ),
+                                    color=discord.Color.gold(),
+                                )
+                                embed_lvl.set_thumbnail(url=member.display_avatar.url)
+                                await log_channel.send(embed=embed_lvl)
 
-                    if log_channel:
-                        try:
-                            buffer = await build_level_up_card(member, old_lvl, current_lvl)
-                            image_file = discord.File(buffer, filename="level_up.png")
-                            embed_lvl = discord.Embed(
-                                title="LEVEL UP!",
-                                description=(
-                                    f"{member.mention} reached **Level {current_lvl}**.\n"
-                                    f"*Voice Time: {user_data['voice_minutes']} min*"
-                                ),
-                                color=discord.Color.from_rgb(231, 76, 60),
-                            )
-                            embed_lvl.set_image(url="attachment://level_up.png")
-                            await log_channel.send(file=image_file, embed=embed_lvl)
-                        except Exception as e:
-                            print(f"Level up card failed: {e}")
-                            embed_lvl = discord.Embed(
-                                title="LEVEL UP!",
-                                description=(
-                                    f"{member.mention} reached **Level {current_lvl}**.\n"
-                                    f"*Voice Time: {user_data['voice_minutes']} min*"
-                                ),
-                                color=discord.Color.gold(),
-                            )
-                            embed_lvl.set_thumbnail(url=member.display_avatar.url)
-                            await log_channel.send(embed=embed_lvl)
-
-                    if current_lvl >= 10 and current_lvl < 20:
-                        role = guild.get_role(ROLE_LVL_10)
-                        if role and role not in member.roles:
-                            await member.add_roles(role)
-                    elif current_lvl >= 20 and current_lvl < 30:
-                        role = guild.get_role(ROLE_LVL_20)
-                        if role and role not in member.roles:
-                            await member.add_roles(role)
-                    elif current_lvl >= 30:
-                        role = guild.get_role(ROLE_LVL_30)
-                        if role and role not in member.roles:
-                            await member.add_roles(role)
+                        if current_lvl >= 10 and current_lvl < 20:
+                            role = guild.get_role(ROLE_LVL_10)
+                            if role and role not in member.roles:
+                                await member.add_roles(role)
+                        elif current_lvl >= 20 and current_lvl < 30:
+                            role = guild.get_role(ROLE_LVL_20)
+                            if role and role not in member.roles:
+                                await member.add_roles(role)
+                        elif current_lvl >= 30:
+                            role = guild.get_role(ROLE_LVL_30)
+                            if role and role not in member.roles:
+                                await member.add_roles(role)
+                except Exception as e:
+                    print(f"Level update failed for {member.id}: {e}")
 
     if data_changed:
         await save_database_to_discord()
@@ -1476,6 +1627,352 @@ async def post_cmd(ctx, *, message: str = None):
     await ctx.send(content or None, files=files or None)
 
 
+_DURATION_RE = re.compile(r"^(\d+)([smhdw])$", re.IGNORECASE)
+MAX_TIMEOUT = timedelta(days=28)
+
+
+def _parse_duration(token: str) -> timedelta | None:
+    match = _DURATION_RE.match((token or "").strip().lower())
+    if not match:
+        return None
+    amount = int(match.group(1))
+    if amount <= 0:
+        return None
+    unit = match.group(2)
+    if unit == "s":
+        return timedelta(seconds=amount)
+    if unit == "m":
+        return timedelta(minutes=amount)
+    if unit == "h":
+        return timedelta(hours=amount)
+    if unit == "d":
+        return timedelta(days=amount)
+    if unit == "w":
+        return timedelta(weeks=amount)
+    return None
+
+
+def _format_duration(delta: timedelta) -> str:
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    if total_seconds < 3600:
+        return f"{total_seconds // 60}m"
+    if total_seconds < 86400:
+        return f"{total_seconds // 3600}h"
+    return f"{total_seconds // 86400}d"
+
+
+def _is_punishment_staff(member: discord.Member) -> bool:
+    if member.guild_permissions.manage_guild:
+        return True
+    if member.guild_permissions.moderate_members:
+        return True
+    if member.guild_permissions.ban_members:
+        return True
+    staff_role = member.guild.get_role(STAFF_ROLE_ID)
+    return bool(staff_role and staff_role in member.roles)
+
+
+def _can_punish_target(moderator: discord.Member, target: discord.Member) -> bool:
+    if target.bot:
+        return False
+    if target.id == moderator.id:
+        return False
+    if target.id == moderator.guild.owner_id:
+        return False
+    if moderator.id != moderator.guild.owner_id and target.top_role >= moderator.top_role:
+        return False
+    if target.top_role >= moderator.guild.me.top_role:
+        return False
+    return True
+
+
+async def _post_punishment_card(
+    ctx,
+    punishment_type: str,
+    target: discord.Member,
+    reason: str,
+    *,
+    duration: timedelta | None = None,
+    extra_note: str | None = None,
+):
+    buffer = await build_punishment_card(target, ctx.author, reason, punishment_type)
+    image_file = discord.File(buffer, filename="punishment.png")
+    label = PUNISHMENT_LABELS[punishment_type]
+    content = f"New Punishment: **{label}** -> {target.mention}"
+    if duration:
+        content += f" ({_format_duration(duration)})"
+    if extra_note:
+        content += f" {extra_note}"
+
+    log_channel = (
+        ctx.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
+        if PUNISHMENT_LOG_CHANNEL_ID
+        else None
+    )
+    destination = log_channel or ctx.channel
+    await destination.send(content=content, file=image_file)
+
+    if log_channel and log_channel.id != ctx.channel.id:
+        await ctx.send(f"Punishment logged in {log_channel.mention}.", delete_after=5)
+
+
+def _punishment_staff_check():
+    async def predicate(ctx):
+        if _is_punishment_staff(ctx.author):
+            return True
+        await ctx.send("You need staff permissions to use punishment commands.", delete_after=8)
+        return False
+
+    return commands.check(predicate)
+
+
+@bot.command(name="ban")
+@_punishment_staff_check()
+@commands.bot_has_permissions(ban_members=True)
+async def ban_cmd(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """Ban a member and post a punishment card."""
+    if not ctx.author.guild_permissions.ban_members:
+        return await ctx.send("You need **Ban Members** permission.", delete_after=8)
+    if not _can_punish_target(ctx.author, member):
+        return await ctx.send("You cannot punish this member.", delete_after=8)
+
+    try:
+        await member.ban(reason=f"{ctx.author}: {reason}", delete_message_days=0)
+    except discord.Forbidden:
+        return await ctx.send("I cannot ban this member.", delete_after=8)
+    except discord.HTTPException as exc:
+        return await ctx.send(f"Ban failed: {exc.text}", delete_after=8)
+
+    await _post_punishment_card(ctx, "ban", member, reason)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="timeout", aliases=["to"])
+@_punishment_staff_check()
+@commands.bot_has_permissions(moderate_members=True)
+async def timeout_cmd(ctx, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
+    """Timeout a member. Example: !timeout @user 1h spam"""
+    if not ctx.author.guild_permissions.moderate_members:
+        return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
+    if not _can_punish_target(ctx.author, member):
+        return await ctx.send("You cannot punish this member.", delete_after=8)
+
+    delta = _parse_duration(duration)
+    if not delta or delta > MAX_TIMEOUT:
+        return await ctx.send("Invalid duration. Example: `30m`, `2h`, `1d` (max 28 days).", delete_after=10)
+
+    until = discord.utils.utcnow() + delta
+    try:
+        await member.timeout(until, reason=f"{ctx.author}: {reason}")
+    except discord.Forbidden:
+        return await ctx.send("I cannot timeout this member.", delete_after=8)
+    except discord.HTTPException as exc:
+        return await ctx.send(f"Timeout failed: {exc.text}", delete_after=8)
+
+    await _post_punishment_card(ctx, "timeout", member, reason, duration=delta)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="chatmute", aliases=["cmute"])
+@_punishment_staff_check()
+@commands.bot_has_permissions(moderate_members=True)
+async def chatmute_cmd(ctx, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
+    """Chat mute (timeout). Example: !chatmute @user 30m toxic"""
+    if not ctx.author.guild_permissions.moderate_members:
+        return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
+    if not _can_punish_target(ctx.author, member):
+        return await ctx.send("You cannot punish this member.", delete_after=8)
+
+    delta = _parse_duration(duration)
+    if not delta or delta > MAX_TIMEOUT:
+        return await ctx.send("Invalid duration. Example: `30m`, `2h`, `1d` (max 28 days).", delete_after=10)
+
+    until = discord.utils.utcnow() + delta
+    try:
+        await member.timeout(until, reason=f"{ctx.author}: {reason}")
+    except discord.Forbidden:
+        return await ctx.send("I cannot mute this member.", delete_after=8)
+    except discord.HTTPException as exc:
+        return await ctx.send(f"Chat mute failed: {exc.text}", delete_after=8)
+
+    await _post_punishment_card(ctx, "chatmute", member, reason, duration=delta)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="voicemute", aliases=["vmute"])
+@_punishment_staff_check()
+@commands.bot_has_permissions(moderate_members=True)
+async def voicemute_cmd(ctx, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
+    """Voice mute. Example: !voicemute @user 1h mic spam"""
+    if not ctx.author.guild_permissions.moderate_members:
+        return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
+    if not _can_punish_target(ctx.author, member):
+        return await ctx.send("You cannot punish this member.", delete_after=8)
+
+    delta = _parse_duration(duration)
+    if not delta or delta > MAX_TIMEOUT:
+        return await ctx.send("Invalid duration. Example: `30m`, `2h`, `1d` (max 28 days).", delete_after=10)
+
+    applied_voice_mute = False
+    if member.voice and member.voice.channel:
+        try:
+            await member.edit(mute=True, reason=f"{ctx.author}: {reason}")
+            applied_voice_mute = True
+        except discord.Forbidden:
+            pass
+
+    if not applied_voice_mute:
+        until = discord.utils.utcnow() + delta
+        try:
+            await member.timeout(until, reason=f"{ctx.author}: {reason}")
+        except discord.Forbidden:
+            return await ctx.send("I cannot voice-mute this member.", delete_after=8)
+        except discord.HTTPException as exc:
+            return await ctx.send(f"Voice mute failed: {exc.text}", delete_after=8)
+
+    await _post_punishment_card(ctx, "voicemute", member, reason, duration=delta)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="warn", aliases=["warning"])
+@_punishment_staff_check()
+async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """Warn a member. After 3 warnings → automatic ban. Example: !warn @user toxic behavior"""
+    if not _can_punish_target(ctx.author, member):
+        return await ctx.send("You cannot punish this member.", delete_after=8)
+
+    count = _add_warning(member.id)
+    await _post_punishment_card(
+        ctx,
+        "warn",
+        member,
+        reason,
+        extra_note=f"**({count}/{MAX_WARNS_BEFORE_BAN})**",
+    )
+
+    if count >= MAX_WARNS_BEFORE_BAN:
+        ban_reason = f"Automatic ban — {MAX_WARNS_BEFORE_BAN} warnings reached. Last: {reason}"
+        try:
+            await member.ban(reason=f"{ctx.author}: {ban_reason}", delete_message_days=0)
+        except discord.Forbidden:
+            log_channel = ctx.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
+            destination = log_channel or ctx.channel
+            await destination.send(
+                f"⚠️ {member.mention} reached **{MAX_WARNS_BEFORE_BAN} warnings** "
+                f"but I cannot ban them (missing **Ban Members** permission)."
+            )
+        except discord.HTTPException as exc:
+            log_channel = ctx.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
+            destination = log_channel or ctx.channel
+            await destination.send(f"Auto-ban failed for {member.mention}: {exc.text}")
+        else:
+            await _post_punishment_card(ctx, "ban", member, ban_reason)
+            _clear_warnings(member.id)
+
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="warnings", aliases=["warns", "getwarns"])
+@_punishment_staff_check()
+async def warnings_cmd(ctx, member: discord.Member = None):
+    """Check how many warnings a member has. Example: !warnings @user"""
+    target = member or ctx.author
+    count = _get_warning_count(target.id)
+    await ctx.send(
+        f"{target.mention} has **{count}/{MAX_WARNS_BEFORE_BAN}** warning(s).",
+        delete_after=10,
+    )
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="clearwarn", aliases=["removewarn", "unwarn", "clearwarnings"])
+@_punishment_staff_check()
+async def clearwarn_cmd(ctx, member: discord.Member, amount: str = "all"):
+    """
+    Remove warning(s) from a member.
+    !clearwarn @user       → remove all warnings
+    !clearwarn @user 1     → remove one warning
+    """
+    if member.bot:
+        return await ctx.send("Bots cannot have warnings.", delete_after=8)
+
+    current = _get_warning_count(member.id)
+    if current == 0:
+        return await ctx.send(f"{member.mention} has no warnings.", delete_after=8)
+
+    token = (amount or "all").strip().lower()
+    if token == "all":
+        _clear_warnings(member.id)
+        msg = f"All warnings cleared for {member.mention} (was **{current}/{MAX_WARNS_BEFORE_BAN}**)."
+    else:
+        try:
+            remove_count = int(token)
+        except ValueError:
+            return await ctx.send("Usage: `!clearwarn @user` or `!clearwarn @user 1`", delete_after=10)
+        if remove_count <= 0:
+            return await ctx.send("Amount must be at least 1.", delete_after=8)
+        for _ in range(min(remove_count, current)):
+            remaining = _remove_warning(member.id)
+        msg = (
+            f"Removed **{min(remove_count, current)}** warning(s) from {member.mention}. "
+            f"Now **{remaining}/{MAX_WARNS_BEFORE_BAN}**."
+        )
+
+    await ctx.send(msg, delete_after=10)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="testpunishment", aliases=["testpunish"])
+@_punishment_staff_check()
+async def test_punishment_cmd(
+    ctx,
+    punishment_type: str,
+    member: discord.Member = None,
+    *,
+    reason: str = "Test punishment",
+):
+    """Preview a punishment card. Example: !testpunishment ban @user Fake report"""
+    target = member or ctx.author
+    punishment_type = punishment_type.lower()
+    if punishment_type not in PUNISHMENT_LABELS:
+        types_list = ", ".join(PUNISHMENT_LABELS)
+        return await ctx.send(f"Unknown type. Use one of: `{types_list}`", delete_after=10)
+
+    try:
+        buffer = await build_punishment_card(target, ctx.author, reason, punishment_type)
+        image_file = discord.File(buffer, filename="punishment.png")
+        label = PUNISHMENT_LABELS[punishment_type]
+        await ctx.send(
+            content=f"New Punishment: **{label}** -> {target.mention} *(preview)*",
+            file=image_file,
+        )
+    except Exception as exc:
+        await ctx.send(f"Punishment preview failed: {exc}", delete_after=10)
+
+
 @bot.event
 async def on_member_join(member):
     guild = member.guild
@@ -1628,6 +2125,21 @@ def _start_health_server() -> None:
     port = int(os.environ.get("PORT", "8080"))
     HTTPServer(("0.0.0.0", port), _HealthHandler).serve_forever()
 
+
+_original_bot_close = bot.close
+
+
+async def _close_with_level_save():
+    if user_levels:
+        if _save_local_database_sync():
+            print("Levels saved locally before shutdown.")
+    if user_warnings:
+        if _save_warnings():
+            print("Warnings saved locally before shutdown.")
+    await _original_bot_close()
+
+
+bot.close = _close_with_level_save
 
 if __name__ == "__main__":
     if os.environ.get("PORT"):
