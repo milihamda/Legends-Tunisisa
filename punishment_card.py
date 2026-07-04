@@ -21,11 +21,11 @@ LABELS = {
     "warn": "WARN",
 }
 
-# Positions as fractions of template width/height (tweak if text is misaligned)
+# Positions as fractions of template width/height (1408×768 templates)
 TEXT_X_RATIO = 0.36
-USERNAME_Y_RATIO = 0.335
-PUNISHER_Y_RATIO = 0.420
-REASON_Y_RATIO = 0.505
+USERNAME_Y_RATIO = 0.315
+PUNISHER_Y_RATIO = 0.398
+REASON_Y_RATIO = 0.483
 FONT_SIZE_RATIO = 0.042
 TEXT_COLOR = "#d4a574"
 MAX_FIELD_LEN = 48
