@@ -1423,6 +1423,12 @@ async def update_levels_task_error(error):
     print(f"update_levels_task crashed: {error}")
 
 
+@bot.command(name="ping")
+async def ping_cmd(ctx):
+    """Check if the bot is online and responding."""
+    await ctx.send(f"Pong — `{round(bot.latency * 1000)}ms`", delete_after=10)
+
+
 @bot.command(name="level")
 async def check_user_level_cmd(ctx, member: discord.Member = None):
     target_member = member or ctx.author
@@ -1727,20 +1733,40 @@ async def _get_punishment_log_channel(guild: discord.Guild | None = None):
 
 
 async def _send_to_punishment_log(channel, content: str, image_file: discord.File):
-    embed = discord.Embed(description=content, color=discord.Color.dark_red())
-    embed.set_image(url="attachment://punishment.png")
-
     if isinstance(channel, discord.ForumChannel):
         title = content.replace("New Punishment: ", "Punishment: ", 1)
         title = title[:100] if len(title) <= 100 else title[:97] + "..."
-        thread = await channel.create_thread(
-            name=title,
-            embed=embed,
-            file=image_file,
-        )
-        return thread
+        return await channel.create_thread(name=title, content=content, file=image_file)
 
-    return await channel.send(embed=embed, file=image_file)
+    return await channel.send(content=content, file=image_file)
+
+
+async def _finish_staff_command(ctx, posted: bool, log_channel=None):
+    """Give staff feedback and only delete their command when the log post succeeded."""
+    if posted:
+        try:
+            await ctx.message.add_reaction("✅")
+        except discord.HTTPException:
+            pass
+        try:
+            await ctx.message.delete()
+        except discord.Forbidden:
+            pass
+        return
+
+    try:
+        if log_channel is not None:
+            await ctx.send(
+                f"Could not post in {log_channel.mention}. Check bot permissions there.",
+                delete_after=12,
+            )
+        else:
+            await ctx.send(
+                f"Punishment log channel not found (`{PUNISHMENT_LOG_CHANNEL_ID}`).",
+                delete_after=12,
+            )
+    except discord.HTTPException:
+        pass
 
 
 async def _post_punishment_card(
@@ -1756,8 +1782,8 @@ async def _post_punishment_card(
     try:
         buffer = await build_punishment_card(target, ctx.author, reason, punishment_type)
     except Exception as exc:
-        await ctx.send(f"Punishment card failed: {exc}", delete_after=12)
         print(f"Punishment card build failed ({punishment_type}): {exc}")
+        await ctx.send(f"Punishment card failed: {exc}", delete_after=12)
         return False
 
     image_file = discord.File(buffer, filename="punishment.png")
@@ -1772,28 +1798,21 @@ async def _post_punishment_card(
 
     log_channel = await _get_punishment_log_channel(ctx.guild)
     if log_channel is None:
-        await ctx.send(
-            f"Could not find punishment log channel (`{PUNISHMENT_LOG_CHANNEL_ID}`). "
-            "Check that the channel ID is correct and the bot can see it.",
-            delete_after=12,
-        )
+        await _finish_staff_command(ctx, False)
         return False
 
     try:
         await _send_to_punishment_log(log_channel, content, image_file)
     except discord.Forbidden:
-        await ctx.send(
-            f"I cannot post in {log_channel.mention}. "
-            "Give the bot **View Channel**, **Send Messages**, and **Attach Files** there.",
-            delete_after=15,
-        )
         print(f"Forbidden posting punishment to {log_channel.id} ({type(log_channel).__name__})")
+        await _finish_staff_command(ctx, False, log_channel)
         return False
     except discord.HTTPException as exc:
-        await ctx.send(f"Failed to post punishment card: {exc.text}", delete_after=12)
         print(f"Punishment post failed in {log_channel.id}: {exc.text}")
+        await _finish_staff_command(ctx, False, log_channel)
         return False
 
+    await _finish_staff_command(ctx, True, log_channel)
     return True
 
 
@@ -1825,10 +1844,6 @@ async def ban_cmd(ctx, member: discord.Member, *, reason: str = "No reason provi
         return await ctx.send(f"Ban failed: {exc.text}", delete_after=8)
 
     await _post_punishment_card(ctx, "ban", member, reason)
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
 
 
 @bot.command(name="timeout", aliases=["to"])
@@ -1854,10 +1869,6 @@ async def timeout_cmd(ctx, member: discord.Member, duration: str, *, reason: str
         return await ctx.send(f"Timeout failed: {exc.text}", delete_after=8)
 
     await _post_punishment_card(ctx, "timeout", member, reason, duration=delta)
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
 
 
 @bot.command(name="chatmute", aliases=["cmute"])
@@ -1883,10 +1894,6 @@ async def chatmute_cmd(ctx, member: discord.Member, duration: str, *, reason: st
         return await ctx.send(f"Chat mute failed: {exc.text}", delete_after=8)
 
     await _post_punishment_card(ctx, "chatmute", member, reason, duration=delta)
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
 
 
 @bot.command(name="voicemute", aliases=["vmute"])
@@ -1921,10 +1928,6 @@ async def voicemute_cmd(ctx, member: discord.Member, duration: str, *, reason: s
             return await ctx.send(f"Voice mute failed: {exc.text}", delete_after=8)
 
     await _post_punishment_card(ctx, "voicemute", member, reason, duration=delta)
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
 
 
 @bot.command(name="warn", aliases=["warning"])
@@ -1961,11 +1964,6 @@ async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason prov
         else:
             await _post_punishment_card(ctx, "ban", member, ban_reason)
             _clear_warnings(member.id)
-
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
 
 
 @bot.command(name="warnings", aliases=["warns", "getwarns"])
@@ -2041,6 +2039,23 @@ async def test_punishment_cmd(
         return await ctx.send(f"Unknown type. Use one of: `{types_list}`", delete_after=10)
 
     await _post_punishment_card(ctx, punishment_type, target, reason, preview=True)
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        return
+    if isinstance(error, commands.MissingRequiredArgument):
+        return await ctx.send(f"Missing argument. Usage: `{ctx.command.signature}`", delete_after=10)
+    if isinstance(error, commands.MemberNotFound):
+        return await ctx.send("Member not found. Mention a valid user.", delete_after=8)
+    if isinstance(error, commands.BadArgument):
+        return await ctx.send("Invalid command usage.", delete_after=8)
+    print(f"Command error in {ctx.command}: {error}")
+    try:
+        await ctx.send("Something went wrong running that command.", delete_after=8)
+    except discord.HTTPException:
+        pass
 
 
 @bot.event
