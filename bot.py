@@ -56,7 +56,7 @@ STAFF_ROLE_IDS = [
 ]
 
 LEVEL_LOG_CHANNEL_ID = 1517921554510385242
-PUNISHMENT_LOG_CHANNEL_ID = int(os.getenv("PUNISHMENT_LOG_CHANNEL_ID", "1522676265381793876"))
+PUNISHMENT_LOG_CHANNEL_ID = 1522676265381793876
 
 DATA_BACKUP_CHANNEL_ID = 1518023858765168771
 BOT_VOICE_CHANNEL_ID = 1518025649225470072
@@ -1688,6 +1688,17 @@ def _can_punish_target(moderator: discord.Member, target: discord.Member) -> boo
     return True
 
 
+async def _get_punishment_log_channel(guild: discord.Guild):
+    channel = guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
+    if channel is not None:
+        return channel
+    try:
+        return await guild.fetch_channel(PUNISHMENT_LOG_CHANNEL_ID)
+    except discord.HTTPException as exc:
+        print(f"Could not fetch punishment log channel {PUNISHMENT_LOG_CHANNEL_ID}: {exc}")
+        return None
+
+
 async def _post_punishment_card(
     ctx,
     punishment_type: str,
@@ -1706,15 +1717,17 @@ async def _post_punishment_card(
     if extra_note:
         content += f" {extra_note}"
 
-    log_channel = (
-        ctx.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
-        if PUNISHMENT_LOG_CHANNEL_ID
-        else None
-    )
-    destination = log_channel or ctx.channel
-    await destination.send(content=content, file=image_file)
+    log_channel = await _get_punishment_log_channel(ctx.guild)
+    if log_channel is None:
+        return await ctx.send(
+            f"Could not find punishment log channel (`{PUNISHMENT_LOG_CHANNEL_ID}`). "
+            "Check bot permissions and channel ID.",
+            delete_after=10,
+        )
 
-    if log_channel and log_channel.id != ctx.channel.id:
+    await log_channel.send(content=content, file=image_file)
+
+    if log_channel.id != ctx.channel.id:
         await ctx.send(f"Punishment logged in {log_channel.mention}.", delete_after=5)
 
 
@@ -1869,16 +1882,16 @@ async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason prov
         try:
             await member.ban(reason=f"{ctx.author}: {ban_reason}", delete_message_days=0)
         except discord.Forbidden:
-            log_channel = ctx.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
-            destination = log_channel or ctx.channel
-            await destination.send(
-                f"⚠️ {member.mention} reached **{MAX_WARNS_BEFORE_BAN} warnings** "
-                f"but I cannot ban them (missing **Ban Members** permission)."
-            )
+            log_channel = await _get_punishment_log_channel(ctx.guild)
+            if log_channel:
+                await log_channel.send(
+                    f"⚠️ {member.mention} reached **{MAX_WARNS_BEFORE_BAN} warnings** "
+                    f"but I cannot ban them (missing **Ban Members** permission)."
+                )
         except discord.HTTPException as exc:
-            log_channel = ctx.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
-            destination = log_channel or ctx.channel
-            await destination.send(f"Auto-ban failed for {member.mention}: {exc.text}")
+            log_channel = await _get_punishment_log_channel(ctx.guild)
+            if log_channel:
+                await log_channel.send(f"Auto-ban failed for {member.mention}: {exc.text}")
         else:
             await _post_punishment_card(ctx, "ban", member, ban_reason)
             _clear_warnings(member.id)
