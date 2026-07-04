@@ -22,7 +22,7 @@ LABELS = {
 }
 
 # Positions as fractions of template width/height (tweak if text is misaligned)
-TEXT_X_RATIO = 0.26
+TEXT_X_RATIO = 0.36
 USERNAME_Y_RATIO = 0.335
 PUNISHER_Y_RATIO = 0.420
 REASON_Y_RATIO = 0.505
