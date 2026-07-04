@@ -1264,6 +1264,15 @@ async def on_ready():
     await load_database_from_discord()
     _load_warnings()
 
+    log_channel = await _get_punishment_log_channel()
+    if log_channel is None:
+        print(f"WARNING: punishment log channel {PUNISHMENT_LOG_CHANNEL_ID} is not accessible.")
+    else:
+        print(
+            f"Punishment log channel ready: {log_channel.name} "
+            f"({log_channel.id}, {type(log_channel).__name__})"
+        )
+
     voice_channel = bot.get_channel(BOT_VOICE_CHANNEL_ID)
     if voice_channel:
         try:
@@ -1688,15 +1697,41 @@ def _can_punish_target(moderator: discord.Member, target: discord.Member) -> boo
     return True
 
 
-async def _get_punishment_log_channel(guild: discord.Guild):
-    channel = guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
-    if channel is not None:
-        return channel
-    try:
-        return await guild.fetch_channel(PUNISHMENT_LOG_CHANNEL_ID)
-    except discord.HTTPException as exc:
-        print(f"Could not fetch punishment log channel {PUNISHMENT_LOG_CHANNEL_ID}: {exc}")
+async def _get_punishment_log_channel(guild: discord.Guild | None = None):
+    channel = bot.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
+    if channel is None and guild is not None:
+        channel = guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(PUNISHMENT_LOG_CHANNEL_ID)
+        except discord.NotFound:
+            print(f"Punishment log channel {PUNISHMENT_LOG_CHANNEL_ID} does not exist.")
+            return None
+        except discord.Forbidden:
+            print(f"Bot cannot access punishment log channel {PUNISHMENT_LOG_CHANNEL_ID}.")
+            return None
+        except discord.HTTPException as exc:
+            print(f"Could not fetch punishment log channel {PUNISHMENT_LOG_CHANNEL_ID}: {exc}")
+            return None
+
+    if not isinstance(
+        channel,
+        (discord.TextChannel, discord.Thread, discord.VoiceChannel, discord.NewsChannel, discord.ForumChannel),
+    ):
+        print(
+            f"Punishment log target {PUNISHMENT_LOG_CHANNEL_ID} is a "
+            f"{type(channel).__name__} — use a text/voice/forum channel ID, not a category."
+        )
         return None
+    return channel
+
+
+async def _send_to_punishment_log(channel, content: str, image_file: discord.File):
+    if isinstance(channel, discord.ForumChannel):
+        title = content.replace("New Punishment: ", "Punishment: ", 1)
+        title = title[:100] if len(title) <= 100 else title[:97] + "..."
+        return await channel.create_thread(name=title, content=content, file=image_file)
+    return await channel.send(content=content, file=image_file)
 
 
 async def _post_punishment_card(
@@ -1707,11 +1742,20 @@ async def _post_punishment_card(
     *,
     duration: timedelta | None = None,
     extra_note: str | None = None,
+    preview: bool = False,
 ):
-    buffer = await build_punishment_card(target, ctx.author, reason, punishment_type)
+    try:
+        buffer = await build_punishment_card(target, ctx.author, reason, punishment_type)
+    except Exception as exc:
+        await ctx.send(f"Punishment card failed: {exc}", delete_after=12)
+        print(f"Punishment card build failed ({punishment_type}): {exc}")
+        return False
+
     image_file = discord.File(buffer, filename="punishment.png")
     label = PUNISHMENT_LABELS[punishment_type]
     content = f"New Punishment: **{label}** -> {target.mention}"
+    if preview:
+        content += " *(preview)*"
     if duration:
         content += f" ({_format_duration(duration)})"
     if extra_note:
@@ -1719,16 +1763,31 @@ async def _post_punishment_card(
 
     log_channel = await _get_punishment_log_channel(ctx.guild)
     if log_channel is None:
-        return await ctx.send(
+        await ctx.send(
             f"Could not find punishment log channel (`{PUNISHMENT_LOG_CHANNEL_ID}`). "
-            "Check bot permissions and channel ID.",
-            delete_after=10,
+            "Check that the channel ID is correct and the bot can see it.",
+            delete_after=12,
         )
+        return False
 
-    await log_channel.send(content=content, file=image_file)
+    try:
+        await _send_to_punishment_log(log_channel, content, image_file)
+    except discord.Forbidden:
+        await ctx.send(
+            f"I cannot post in {log_channel.mention}. "
+            "Give the bot **View Channel**, **Send Messages**, and **Attach Files** there.",
+            delete_after=15,
+        )
+        print(f"Forbidden posting punishment to {log_channel.id} ({type(log_channel).__name__})")
+        return False
+    except discord.HTTPException as exc:
+        await ctx.send(f"Failed to post punishment card: {exc.text}", delete_after=12)
+        print(f"Punishment post failed in {log_channel.id}: {exc.text}")
+        return False
 
     if log_channel.id != ctx.channel.id:
         await ctx.send(f"Punishment logged in {log_channel.mention}.", delete_after=5)
+    return True
 
 
 def _punishment_staff_check():
@@ -1967,23 +2026,14 @@ async def test_punishment_cmd(
     *,
     reason: str = "Test punishment",
 ):
-    """Preview a punishment card. Example: !testpunishment ban @user Fake report"""
+    """Preview a punishment card in the punishment log channel."""
     target = member or ctx.author
     punishment_type = punishment_type.lower()
     if punishment_type not in PUNISHMENT_LABELS:
         types_list = ", ".join(PUNISHMENT_LABELS)
         return await ctx.send(f"Unknown type. Use one of: `{types_list}`", delete_after=10)
 
-    try:
-        buffer = await build_punishment_card(target, ctx.author, reason, punishment_type)
-        image_file = discord.File(buffer, filename="punishment.png")
-        label = PUNISHMENT_LABELS[punishment_type]
-        await ctx.send(
-            content=f"New Punishment: **{label}** -> {target.mention} *(preview)*",
-            file=image_file,
-        )
-    except Exception as exc:
-        await ctx.send(f"Punishment preview failed: {exc}", delete_after=10)
+    await _post_punishment_card(ctx, punishment_type, target, reason, preview=True)
 
 
 @bot.event
