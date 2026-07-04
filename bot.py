@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import discord
+from discord.abc import Messageable
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
@@ -1703,6 +1704,16 @@ def _can_punish_target(moderator: discord.Member, target: discord.Member) -> boo
     return True
 
 
+def _is_valid_punishment_log_channel(channel) -> bool:
+    if channel is None:
+        return False
+    if isinstance(channel, discord.CategoryChannel):
+        return False
+    if isinstance(channel, discord.ForumChannel):
+        return True
+    return isinstance(channel, Messageable)
+
+
 async def _get_punishment_log_channel(guild: discord.Guild | None = None):
     channel = bot.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
     if channel is None and guild is not None:
@@ -1720,10 +1731,7 @@ async def _get_punishment_log_channel(guild: discord.Guild | None = None):
             print(f"Could not fetch punishment log channel {PUNISHMENT_LOG_CHANNEL_ID}: {exc}")
             return None
 
-    if not isinstance(
-        channel,
-        (discord.TextChannel, discord.Thread, discord.VoiceChannel, discord.NewsChannel, discord.ForumChannel),
-    ):
+    if not _is_valid_punishment_log_channel(channel):
         print(
             f"Punishment log target {PUNISHMENT_LOG_CHANNEL_ID} is a "
             f"{type(channel).__name__} — use a text/voice/forum channel ID, not a category."
