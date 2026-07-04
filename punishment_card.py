@@ -23,9 +23,10 @@ LABELS = {
 
 # Positions as fractions of template width/height (tweak if text is misaligned)
 TEXT_X_RATIO = 0.055
-USERNAME_Y_RATIO = 0.358
-STAFF_Y_RATIO = 0.458
-REASON_Y_RATIO = 0.558
+SERVER_NAME = "Legends Tunisia"
+SERVER_NAME_Y_RATIO = 0.325
+USERNAME_Y_RATIO = 0.408
+REASON_Y_RATIO = 0.491
 FONT_SIZE_RATIO = 0.042
 TEXT_COLOR = "#d4a574"
 MAX_FIELD_LEN = 48
@@ -79,8 +80,8 @@ async def build_punishment_card(
 
     text_x = int(width * TEXT_X_RATIO)
     lines = (
+        (int(height * SERVER_NAME_Y_RATIO), _truncate(SERVER_NAME, max_len=32)),
         (int(height * USERNAME_Y_RATIO), _truncate(_display_name(member))),
-        (int(height * STAFF_Y_RATIO), _truncate(_display_name(punisher))),
         (int(height * REASON_Y_RATIO), _truncate(reason or "No reason provided")),
     )
 
