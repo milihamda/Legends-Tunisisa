@@ -1332,16 +1332,6 @@ async def before_empty_temp_rooms_cleanup_task():
     await bot.wait_until_ready()
 
 
-@update_levels_task.before_loop
-async def before_update_levels_task():
-    await bot.wait_until_ready()
-
-
-@update_levels_task.error
-async def update_levels_task_error(error):
-    print(f"update_levels_task crashed: {error}")
-
-
 @tasks.loop(minutes=1.0)
 async def update_levels_task():
     data_changed = False
@@ -1412,6 +1402,16 @@ async def update_levels_task():
 
     if data_changed:
         await save_database_to_discord()
+
+
+@update_levels_task.before_loop
+async def before_update_levels_task():
+    await bot.wait_until_ready()
+
+
+@update_levels_task.error
+async def update_levels_task_error(error):
+    print(f"update_levels_task crashed: {error}")
 
 
 @bot.command(name="level")
