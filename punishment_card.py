@@ -23,9 +23,9 @@ LABELS = {
 
 # Positions as fractions of template width/height (tweak if text is misaligned)
 TEXT_X_RATIO = 0.055
-USERNAME_Y_RATIO = 0.405
-STAFF_Y_RATIO = 0.505
-REASON_Y_RATIO = 0.605
+USERNAME_Y_RATIO = 0.358
+STAFF_Y_RATIO = 0.458
+REASON_Y_RATIO = 0.558
 FONT_SIZE_RATIO = 0.042
 TEXT_COLOR = "#d4a574"
 MAX_FIELD_LEN = 48
@@ -85,7 +85,7 @@ async def build_punishment_card(
     )
 
     for y, text in lines:
-        draw.text((text_x, y), text, font=font, fill=TEXT_COLOR, anchor="lm")
+        draw.text((text_x, y), text, font=font, fill=TEXT_COLOR, anchor="ls")
 
     buffer = io.BytesIO()
     canvas.save(buffer, format="PNG")
