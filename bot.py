@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import math
 import os
@@ -661,7 +662,7 @@ async def _refresh_bot_chat_welcome_message(guild):
         except discord.Forbidden:
             return
 
-    message = await channel.send(BOT_CHAT_MESSAGE, suppress=True)
+    message = await channel.send(BOT_CHAT_MESSAGE)
     bot_chat_messages[guild.id] = message.id
 
 
@@ -1354,7 +1355,19 @@ async def _read_levels_from_discord_backup() -> dict:
 
     try:
         async for message in channel.history(limit=10):
-            if message.author == bot.user and message.content.startswith("```json"):
+            if message.author != bot.user:
+                continue
+
+            for attachment in message.attachments:
+                if not attachment.filename.lower().endswith(".json"):
+                    continue
+                try:
+                    payload = await attachment.read()
+                    return _normalize_levels_payload(json.loads(payload.decode("utf-8")))
+                except Exception as e:
+                    print(f"Error reading backup attachment {attachment.filename}: {e}")
+
+            if message.content.startswith("```json"):
                 clean_content = message.content.strip("```json").strip("```")
                 return _normalize_levels_payload(json.loads(clean_content))
     except Exception as e:
@@ -1393,14 +1406,19 @@ async def save_database_to_discord():
 
     try:
         formatted_data = {str(k): v for k, v in user_levels.items()}
-        json_string = json.dumps(formatted_data, ensure_ascii=False, indent=2)
+        json_bytes = json.dumps(formatted_data, ensure_ascii=False, indent=2).encode("utf-8")
+        backup_file = discord.File(io.BytesIO(json_bytes), filename="levels_database.json")
         backup_message = await channel.send(
-            content=f"```json\n{json_string}\n```",
+            content="**AUTOMATIC DATA BACKUP SECURED** — see attached `levels_database.json`.",
             embed=discord.Embed(
                 title="AUTOMATIC DATA BACKUP SECURED",
-                description="Automated backup for server voice levels.\n**DO NOT DELETE THIS MESSAGE.**",
+                description=(
+                    "Automated backup for server voice levels.\n"
+                    "**DO NOT DELETE THIS MESSAGE.**"
+                ),
                 color=discord.Color.green(),
             ),
+            file=backup_file,
         )
         try:
             await channel.purge(
