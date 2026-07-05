@@ -232,8 +232,8 @@ MAX_WARNS_BEFORE_BAN = 3
 
 WARN_1_ROLE_ID = 1523000242491097208
 WARN_2_ROLE_ID = 1523000417758347274
-CHAT_MUTE_ROLE_ID = 1523000899692138668
-VOICE_MUTE_ROLE_ID = 1523473905237495839
+CHAT_MUTE_ROLE_ID = 1523473905237495839
+VOICE_MUTE_ROLE_ID = 1523000899692138668
 WARN_3_ROLE_IDS = (CHAT_MUTE_ROLE_ID, VOICE_MUTE_ROLE_ID)
 WARN_EARLY_ROLE_IDS = (WARN_1_ROLE_ID, WARN_2_ROLE_ID)
 WARN_3_MUTE_DURATION = timedelta(days=1)
@@ -1768,12 +1768,25 @@ async def _remove_chat_mute(
 
 
 def _is_voice_muted(member: discord.Member) -> bool:
+    return _has_voice_mute_role(member) or (
+        member.voice is not None and member.voice.channel is not None and member.voice.mute
+    )
+
+
+def _has_voice_mute_role(member: discord.Member) -> bool:
     voice_mute_role = member.guild.get_role(VOICE_MUTE_ROLE_ID)
-    if voice_mute_role and voice_mute_role in member.roles:
-        return True
-    if member.voice and member.voice.channel and member.voice.mute:
-        return True
-    return False
+    return bool(voice_mute_role and voice_mute_role in member.roles)
+
+
+async def _enforce_voice_mute_state(member: discord.Member, *, reason: str = "Voice mute active") -> None:
+    if member.bot or not _has_voice_mute_role(member):
+        return
+    if not member.voice or not member.voice.channel or member.voice.mute:
+        return
+    try:
+        await member.edit(mute=True, reason=reason)
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print(f"Voice mute enforce failed for {member.id}: {exc}")
 
 
 async def _remove_voice_mute(
@@ -1812,12 +1825,7 @@ async def _enforce_chat_mute(message: discord.Message) -> bool:
 async def _apply_warn_3_mutes(member: discord.Member, moderator: discord.Member, reason: str) -> None:
     mute_reason = f"{moderator}: Warn 3 — {reason}"
     await _apply_chat_mute(member, WARN_3_MUTE_DURATION, moderator, f"Warn 3 — {reason}")
-
-    if member.voice and member.voice.channel:
-        try:
-            await member.edit(mute=True, reason=mute_reason)
-        except (discord.Forbidden, discord.HTTPException) as exc:
-            print(f"Warn 3 voice mute failed for {member.id}: {exc}")
+    await _enforce_voice_mute_state(member, reason=mute_reason)
 
 
 async def _apply_warn_consequences(
@@ -3163,22 +3171,14 @@ async def voicemute_cmd(ctx, member: discord.Member, duration: str, *, reason: s
     if not delta or delta > MAX_TIMEOUT:
         return await ctx.send("Invalid duration. Example: `30m`, `2h`, `1d` (max 28 days).", delete_after=10)
 
-    applied_voice_mute = False
-    if member.voice and member.voice.channel:
-        try:
-            await member.edit(mute=True, reason=f"{ctx.author}: {reason}")
-            applied_voice_mute = True
-        except discord.Forbidden:
-            pass
-
-    if not applied_voice_mute:
-        until = discord.utils.utcnow() + delta
-        try:
-            await member.timeout(until, reason=f"{ctx.author}: {reason}")
-        except discord.Forbidden:
-            return await ctx.send("I cannot voice-mute this member.", delete_after=8)
-        except discord.HTTPException as exc:
-            return await ctx.send(f"Voice mute failed: {exc.text}", delete_after=8)
+    mute_reason = f"{ctx.author}: {reason}"
+    try:
+        await _safe_add_roles(member, [VOICE_MUTE_ROLE_ID], reason=mute_reason)
+        await _enforce_voice_mute_state(member, reason=mute_reason)
+    except discord.Forbidden:
+        return await ctx.send("I cannot voice-mute this member (check **Manage Roles** / hierarchy).", delete_after=8)
+    except discord.HTTPException as exc:
+        return await ctx.send(f"Voice mute failed: {exc.text}", delete_after=8)
 
     await _post_punishment_card(ctx, "voicemute", member, reason, duration=delta)
 
@@ -3424,8 +3424,28 @@ async def on_member_join(member):
 
 
 @bot.event
+async def on_member_update(before, after):
+    if before.roles == after.roles:
+        return
+
+    had_voice_mute = any(role.id == VOICE_MUTE_ROLE_ID for role in before.roles)
+    has_voice_mute = _has_voice_mute_role(after)
+
+    if not had_voice_mute and has_voice_mute:
+        await _enforce_voice_mute_state(after, reason="Voice mute role assigned")
+    elif had_voice_mute and not has_voice_mute and after.voice and after.voice.channel:
+        try:
+            await after.edit(mute=False, reason="Voice mute role removed")
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"Voice unmute on role removal failed for {after.id}: {exc}")
+
+
+@bot.event
 async def on_voice_state_update(member, before, after):
     guild = member.guild
+
+    if not member.bot and after.channel:
+        await _enforce_voice_mute_state(member)
 
     if after.channel and after.channel.id in locked_rooms and not member.bot:
         allowed = locked_room_members.get(after.channel.id, set())
