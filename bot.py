@@ -37,6 +37,16 @@ STAFF_ROLE_ID = 1517586424306598140
 NOT_VERIFIED_ROLE_ID = 1517593118399139840
 WELCOME_CHANNEL_ID = 1511674200543199333
 
+# Roles auto-assigned when a member joins the server
+NEW_MEMBER_ROLE_IDS = [
+    1523437275768291400,
+    1523437226330030270,
+    1523437146739052604,
+    1523441776331853844,
+    1523441832095252564,
+]
+JOIN_AUTO_ROLE_IDS = [NOT_VERIFIED_ROLE_ID, *NEW_MEMBER_ROLE_IDS]
+
 BOY_ROLE_ID = 1517606739812417647
 GIRL_ROLE_ID = 1517606871064776804
 
@@ -581,6 +591,34 @@ def _get_giveaway_guild():
 
 def _is_giveaway_admin(member):
     return _member_has_any_role(member, [GIVEAWAY_ADMIN_ROLE_ID])
+
+
+async def _assign_join_roles(member: discord.Member) -> None:
+    roles_to_add = []
+    for role_id in JOIN_AUTO_ROLE_IDS:
+        role = member.guild.get_role(role_id)
+        if role and role not in member.roles:
+            roles_to_add.append(role)
+    if not roles_to_add:
+        return
+    try:
+        await member.add_roles(*roles_to_add, reason="New member auto-role")
+        names = ", ".join(role.name for role in roles_to_add)
+        print(f"Given join roles to {member.name}: {names}")
+    except Exception as e:
+        print(f"Failed to give join roles to {member.name}: {e}")
+
+
+async def _assign_missing_roles(member: discord.Member, roles: list[discord.Role], *, reason: str) -> int:
+    roles_to_add = [role for role in roles if role not in member.roles]
+    if not roles_to_add:
+        return 0
+    await member.add_roles(*roles_to_add, reason=reason)
+    return len(roles_to_add)
+
+
+def _get_guild_roles_by_ids(guild: discord.Guild, role_ids: list[int]) -> list[discord.Role]:
+    return [role for role_id in role_ids if (role := guild.get_role(role_id))]
 
 
 def _get_bot_chat_channel(guild):
@@ -2266,6 +2304,65 @@ async def post_roles_cmd(ctx):
         pass
 
 
+@bot.command(name="syncroles", aliases=["syncjoinroles"])
+@commands.has_permissions(manage_guild=True)
+async def sync_roles_cmd(ctx):
+    """Give the 5 default member roles to all members who are missing them (admin)."""
+    guild = ctx.guild
+    status = await ctx.send("⏳ Jari nesta3mlou el roles 3la kol el membres...")
+
+    if not guild.me.guild_permissions.manage_roles:
+        return await status.edit(content="❌ El bot ma 3andhouch **Manage Roles**.")
+
+    roles = _get_guild_roles_by_ids(guild, NEW_MEMBER_ROLE_IDS)
+    if not roles:
+        return await status.edit(content="❌ Ma l9inahomch el roles fi serveur. Chouf el IDs fi bot.py.")
+
+    if len(roles) < len(NEW_MEMBER_ROLE_IDS):
+        await status.edit(
+            content=f"⚠️ {len(NEW_MEMBER_ROLE_IDS) - len(roles)} role(s) ma l9inahomch. Nkammlou b el li mawjoudin..."
+        )
+
+    try:
+        await guild.chunk()
+    except Exception as e:
+        print(f"syncroles chunk failed: {e}")
+
+    updated = 0
+    skipped = 0
+    failed = 0
+    reason = f"Role sync by {ctx.author}"
+
+    for member in guild.members:
+        if member.bot:
+            continue
+        try:
+            added = await _assign_missing_roles(member, roles, reason=reason)
+            if added:
+                updated += 1
+                if updated % 20 == 0:
+                    await asyncio.sleep(1)
+            else:
+                skipped += 1
+        except discord.Forbidden:
+            failed += 1
+        except discord.HTTPException as exc:
+            failed += 1
+            if exc.status == 429:
+                await asyncio.sleep(getattr(exc, "retry_after", 2) or 2)
+
+    role_names = ", ".join(role.name for role in roles)
+    await status.edit(
+        content=(
+            f"✅ **Sync roles kemmel!**\n"
+            f"• **Roles:** {role_names}\n"
+            f"• **Updated:** {updated} membres\n"
+            f"• **Deja 3andhomhom:** {skipped}\n"
+            f"• **Failed:** {failed}"
+        )
+    )
+
+
 @bot.command(name="ticketpanel", aliases=["go"])
 @commands.has_permissions(manage_guild=True)
 async def ticket_panel_cmd(ctx):
@@ -3009,13 +3106,7 @@ async def on_member_join(member):
     guild = member.guild
     welcome_channel = guild.get_channel(WELCOME_CHANNEL_ID)
 
-    not_verified_role = guild.get_role(NOT_VERIFIED_ROLE_ID)
-    if not_verified_role:
-        try:
-            await member.add_roles(not_verified_role)
-            print(f"Given Not Verified role to {member.name}")
-        except Exception as e:
-            print(f"Failed to give role: {e}")
+    await _assign_join_roles(member)
 
     if not welcome_channel:
         return
