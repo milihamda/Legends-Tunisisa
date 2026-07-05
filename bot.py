@@ -6,6 +6,7 @@ import os
 import random
 import re
 import threading
+import time
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -56,6 +57,9 @@ STAFF_ROLE_IDS = [
     # Add more staff role IDs:
     # 1517586424306598140,
 ]
+
+GIVEAWAY_CHANNEL_ID = 1518721917312434197
+GIVEAWAY_ADMIN_ROLE_ID = 1511828976732209252
 
 TICKET_PANEL_CHANNEL_ID = 1522527871887998987
 TICKET_LOG_CHANNEL_ID = 1522527871887998987
@@ -215,6 +219,8 @@ ticket_channels: dict[int, dict] = {}
 WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
 user_warnings: dict[int, int] = {}
 MAX_WARNS_BEFORE_BAN = 3
+active_giveaways: dict[int, asyncio.Event] = {}
+current_giveaway_view = None
 
 LOUNGE_ROOM_NAME_PREFIX = "🎙️|"
 LOUNGE_ROOM_NAME_SUFFIX = " ✓"
@@ -566,6 +572,15 @@ async def _notify_roles_members(guild, role_ids, embed):
 def _member_has_any_role(member, role_ids):
     member_role_ids = {r.id for r in member.roles}
     return any(rid in member_role_ids for rid in role_ids)
+
+
+def _get_giveaway_guild():
+    channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
+    return channel.guild if channel else None
+
+
+def _is_giveaway_admin(member):
+    return _member_has_any_role(member, [GIVEAWAY_ADMIN_ROLE_ID])
 
 
 def _get_bot_chat_channel(guild):
@@ -1283,6 +1298,42 @@ class GameRoleSelect(discord.ui.Select):
             msg = "All game roles removed."
 
         await interaction.followup.send(msg, ephemeral=True)
+
+
+class GiveawayView(discord.ui.View):
+    def __init__(self, timeout=None):
+        super().__init__(timeout=timeout)
+        self.participants = set()
+        self.kicked_users = set()
+
+    @discord.ui.button(label="🎉 Join Giveaway", style=discord.ButtonStyle.primary, custom_id="giveaway_join")
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in self.kicked_users:
+            await interaction.response.send_message(
+                "❌ Ma tnajemch tcharrek fi hal giveaway, rak tna7it menha!",
+                ephemeral=True,
+            )
+            return
+
+        if interaction.user.id in self.participants:
+            await interaction.response.send_message("Enti m9ayed deja fi hal giveaway!", ephemeral=True)
+        else:
+            self.participants.add(interaction.user.id)
+            await interaction.response.send_message(
+                "✅ Rak 9ayedt m3ana fil giveaway! Bonne chance! 🎉",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="👀 Chkoun Charek", style=discord.ButtonStyle.secondary, custom_id="giveaway_list")
+    async def list_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if len(self.participants) == 0:
+            await interaction.response.send_message("😢 Mezel 7ad ma charek fi hal giveaway!", ephemeral=True)
+        else:
+            participants_list = ", ".join(f"<@{p}>" for p in self.participants)
+            await interaction.response.send_message(
+                f"👥 **Eli charkou lkol ({len(self.participants)}):**\n{participants_list}",
+                ephemeral=True,
+            )
 
 
 class GameRolePickerView(discord.ui.View):
@@ -2291,6 +2342,207 @@ async def post_cmd(ctx, *, message: str = None):
         pass
 
     await ctx.send(content or None, files=files or None)
+
+
+@bot.command(name="giveaway")
+async def giveaway_cmd(ctx):
+    global current_giveaway_view
+    guild = _get_giveaway_guild()
+    if guild is None:
+        return await ctx.send("❌ Giveaway channel ma l9inech. Chouf el config mta3 el bot.", delete_after=10)
+
+    member = guild.get_member(ctx.author.id)
+    if not member:
+        try:
+            member = await guild.fetch_member(ctx.author.id)
+        except discord.NotFound:
+            return await ctx.author.send("❌ أنت لست عضواً في السيرفر المخصص لهذا البوت!")
+
+    if not _is_giveaway_admin(member):
+        return await ctx.author.send("❌ Ma 3andekch el permission kan t7ab bara a7ki ma3 @mobo33.3 !")
+
+    try:
+        await ctx.author.send("👋 Ahla bik! Haya n7athrou el giveaway m3a ba3dhna. Jawebni 3ala hal as2la:")
+        if ctx.guild:
+            await ctx.send(
+                f"✅ <@{ctx.author.id}>, b3athtlek message privé (DM) bech n7athrou el giveaway!"
+            )
+    except discord.Forbidden:
+        await ctx.send("❌ Ma najamtech nab3athlek message! Lazmek t7el les messages privés (DMs) mta3ek.")
+        return
+
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.author.dm_channel
+
+    try:
+        await ctx.author.send("🎁 **1. Chnouwa el jeyza?**")
+        msg_prize = await bot.wait_for("message", timeout=60.0, check=check)
+        prize = msg_prize.content
+
+        await ctx.author.send("⏳ **2. 9adeh men se3a bech yo93od el giveaway?**")
+        msg_time = await bot.wait_for("message", timeout=60.0, check=check)
+        hours = float(msg_time.content)
+
+        await ctx.author.send("🏆 **3. 9adeh min we7ed bech yarba7?**")
+        msg_winners = await bot.wait_for("message", timeout=60.0, check=check)
+        winners_count = int(msg_winners.content)
+
+        await ctx.author.send(
+            "🎲 **4. T7eb chkoun yarba7 yt7aded zhar?**\n"
+            "👉 Ekteb `random` ken t7ebha zhar.\n"
+            "👉 Walla a3tini el **ID** mta3 cha5s mo3ayen ken t7ebou yarba7 bessaif."
+        )
+        msg_mode = await bot.wait_for("message", timeout=60.0, check=check)
+        mode = msg_mode.content.strip().lower()
+
+    except asyncio.TimeoutError:
+        return await ctx.author.send("❌ Btit barcha ma jawebtnech! 3awed ekteb `!giveaway` min jdid.")
+    except ValueError:
+        return await ctx.author.send("❌ Ghalta fil ar9am! 3awed min jdid w ekteb ar9am s7i7a.")
+
+    await ctx.author.send(
+        "✅ Sayé, el giveaway hebet tawa fil serveur! (Tnajem tekteb `!stop` houni ken t7eb twa9afha wa9t ma t7eb)."
+    )
+
+    end_time = int(time.time() + (hours * 3600))
+    embed = discord.Embed(
+        title=f"🎉 GIVEAWAY: {prize} 🎉",
+        description=(
+            f"**Enzel 3al 9ars louta bach tqayed m3ana!**\n\n"
+            f"⏳ Toufa: <t:{end_time}:R>\n"
+            f"🏆 9adeh min we7ed bech yarba7: **{winners_count}**\n"
+            f"🎁 El Jeyza: **{prize}**"
+        ),
+        color=discord.Color.blue(),
+    )
+    embed.set_footer(text=f"Hosted by: {ctx.author.display_name} | Famma 9ars bach tchouf chkoun charek")
+
+    view = GiveawayView(timeout=hours * 3600)
+    current_giveaway_view = view
+
+    channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
+    if not channel:
+        channel = ctx.channel
+
+    msg = await channel.send(embed=embed, view=view)
+
+    stop_event = asyncio.Event()
+    active_giveaways[ctx.author.id] = stop_event
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=hours * 3600)
+    except asyncio.TimeoutError:
+        pass
+
+    is_manually_stopped = stop_event.is_set()
+
+    if ctx.author.id in active_giveaways:
+        del active_giveaways[ctx.author.id]
+
+    for child in view.children:
+        child.disabled = True
+    await msg.edit(view=view)
+
+    current_giveaway_view = None
+
+    if is_manually_stopped:
+        await channel.send("desole fama 7aja 8alta taw ba3ad nchofo kifah")
+        return
+
+    if len(view.participants) == 0:
+        await channel.send(f"Giveaway 3ala **{prize}** wfet, ama 7ad ma 9ayed! 😢")
+        return
+
+    actual_winners_count = min(winners_count, len(view.participants))
+
+    if mode == "random":
+        winners = random.sample(list(view.participants), actual_winners_count)
+    else:
+        rigged_id = int(mode) if mode.isdigit() else None
+        if rigged_id and rigged_id in view.participants:
+            winners = [rigged_id]
+            if actual_winners_count > 1:
+                remaining = list(view.participants)
+                remaining.remove(rigged_id)
+                winners += random.sample(remaining, actual_winners_count - 1)
+        else:
+            winners = random.sample(list(view.participants), actual_winners_count)
+
+    winners_mentions = ", ".join(f"<@{w}>" for w in winners)
+    count_participants = len(view.participants)
+
+    public_msg = (
+        f"🎉 **WFET EL GIVEAWAY!** 🎉\n\n"
+        f"🎁 **El Jeyza:** {prize}\n"
+        f"👑 **Eli rba7:** {winners_mentions} (Mabrouk!)\n"
+        f"👥 **9adeh charkou:** {count_participants} min nes\n\n"
+        f"🔗 **Link mta3 giveaway:** {msg.jump_url}"
+    )
+    await channel.send(public_msg)
+
+    for winner_id in winners:
+        try:
+            winner_user = await bot.fetch_user(winner_id)
+            await winner_user.send(
+                f"🎉 **MABROUK!** 🎉\n"
+                f"Rak rba7t **{prize}** fil giveaway mta3 serveur!\n"
+                f"🔗 Tnajem tchouf el resulta houni: {msg.jump_url}"
+            )
+        except discord.Forbidden:
+            pass
+        except Exception as e:
+            print(f"Erreur DM lel reba7: {e}")
+
+
+@bot.command(name="stop")
+async def stop_giveaway_cmd(ctx):
+    guild = _get_giveaway_guild()
+    if guild is None:
+        return await ctx.send("❌ Giveaway channel ma l9inech.", delete_after=10)
+
+    try:
+        member = await guild.fetch_member(ctx.author.id)
+    except discord.NotFound:
+        return await ctx.send("❌ Enti mch fil serveur mta3 el giveaway!")
+
+    if not _is_giveaway_admin(member):
+        return await ctx.send("❌ Ma 3andekch el permission bech twa9af el giveaway!")
+
+    if ctx.author.id in active_giveaways:
+        active_giveaways[ctx.author.id].set()
+        await ctx.send("🛑 **Sayé, 3tit amr bech nwa9af el giveaway tawa!**")
+    else:
+        await ctx.send("❌ Ma fammech giveaway te5dem bil ID hetha.")
+
+
+@bot.command(name="kickuser")
+async def kickuser_giveaway_cmd(ctx, user: discord.User):
+    global current_giveaway_view
+
+    guild = _get_giveaway_guild()
+    if guild is None:
+        return await ctx.send("❌ Giveaway channel ma l9inech.", delete_after=10)
+
+    try:
+        member = await guild.fetch_member(ctx.author.id)
+    except discord.NotFound:
+        return await ctx.send("❌ Error")
+
+    if not _is_giveaway_admin(member) and ctx.author.id != guild.owner_id:
+        return await ctx.send("❌ Ma 3andekch permission bech testa3mel hal command!")
+
+    if current_giveaway_view is None:
+        return await ctx.send("❌ Ma famma 7atta giveaway te5dem tawa باش تنحي منها شكون!")
+
+    if user.id in current_giveaway_view.participants:
+        current_giveaway_view.participants.remove(user.id)
+        current_giveaway_view.kicked_users.add(user.id)
+        await ctx.send(f"✅ **{user.name}** tna7a men hal giveaway w m9ادش ينجم يدخل فيها!")
+    else:
+        current_giveaway_view.kicked_users.add(user.id)
+        await ctx.send(
+            f"🚫 **{user.name}** mch m9ayed, ama t7at fi block mta3 hal giveaway (ميقدرش يدخلها)!"
+        )
 
 
 _DURATION_RE = re.compile(r"^(\d+)([smhdw])$", re.IGNORECASE)
