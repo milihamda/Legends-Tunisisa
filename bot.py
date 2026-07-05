@@ -28,7 +28,7 @@ if not TOKEN:
 CREATE_CHANNEL_ID = 1517870390968582155
 
 # Category where join-to-create temp voice rooms are created
-TEMP_VOICE_CATEGORY_ID = 1522403493711712337
+TEMP_VOICE_CATEGORY_ID = 1523436013337448638
 _env_temp_cat = os.getenv("TEMP_VOICE_CATEGORY_ID", "").strip()
 if _env_temp_cat and _env_temp_cat not in ("0", "none", "false"):
     TEMP_VOICE_CATEGORY_ID = int(_env_temp_cat)
