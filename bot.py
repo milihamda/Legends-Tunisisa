@@ -232,14 +232,14 @@ MAX_WARNS_BEFORE_BAN = 3
 
 WARN_1_ROLE_ID = 1523000242491097208
 WARN_2_ROLE_ID = 1523000417758347274
-WARN_3_ROLE_IDS = (
-    1523000899692138668,
-    1523473905237495839,
-)
+CHAT_MUTE_ROLE_ID = 1523000899692138668
+VOICE_MUTE_ROLE_ID = 1523473905237495839
+WARN_3_ROLE_IDS = (CHAT_MUTE_ROLE_ID, VOICE_MUTE_ROLE_ID)
 WARN_EARLY_ROLE_IDS = (WARN_1_ROLE_ID, WARN_2_ROLE_ID)
 WARN_3_MUTE_DURATION = timedelta(days=1)
 
 active_giveaways: dict[int, asyncio.Event] = {}
+chat_mute_expiry_tasks: dict[int, asyncio.Task] = {}
 current_giveaway_view = None
 
 LOUNGE_ROOM_NAME_PREFIX = "🎙️|"
@@ -1698,13 +1698,120 @@ async def _safe_remove_roles(member: discord.Member, role_ids, *, reason: str) -
     await member.remove_roles(*roles, reason=reason)
 
 
-async def _apply_warn_3_mutes(member: discord.Member, moderator: discord.Member, reason: str) -> None:
-    mute_reason = f"{moderator}: Warn 3 — {reason}"
-    until = discord.utils.utcnow() + WARN_3_MUTE_DURATION
+def _is_chat_muted(member: discord.Member) -> bool:
+    chat_mute_role = member.guild.get_role(CHAT_MUTE_ROLE_ID)
+    if chat_mute_role and chat_mute_role in member.roles:
+        return True
+    if member.timed_out_until and member.timed_out_until > discord.utils.utcnow():
+        return True
+    return False
+
+
+def _cancel_chat_mute_expiry(user_id: int) -> None:
+    task = chat_mute_expiry_tasks.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _schedule_chat_mute_expiry(member: discord.Member, duration: timedelta) -> None:
+    guild = member.guild
+    user_id = member.id
+    seconds = max(int(duration.total_seconds()), 1)
+
+    async def _expire():
+        await asyncio.sleep(seconds)
+        chat_mute_expiry_tasks.pop(user_id, None)
+        target = guild.get_member(user_id)
+        if target is None:
+            try:
+                target = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.HTTPException):
+                return
+        try:
+            await _safe_remove_roles(target, [CHAT_MUTE_ROLE_ID], reason="Chat mute expired")
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"Chat mute role removal failed for {user_id}: {exc}")
+
+    _cancel_chat_mute_expiry(user_id)
+    chat_mute_expiry_tasks[user_id] = asyncio.create_task(_expire())
+
+
+async def _apply_chat_mute(
+    member: discord.Member,
+    duration: timedelta,
+    moderator: discord.Member,
+    reason: str,
+) -> None:
+    mute_reason = f"{moderator}: {reason}"
+    await _safe_add_roles(member, [CHAT_MUTE_ROLE_ID], reason=mute_reason)
+    until = discord.utils.utcnow() + duration
     try:
         await member.timeout(until, reason=mute_reason)
     except (discord.Forbidden, discord.HTTPException) as exc:
-        print(f"Warn 3 chat mute failed for {member.id}: {exc}")
+        print(f"Chat mute timeout failed for {member.id}: {exc}")
+    await _schedule_chat_mute_expiry(member, duration)
+
+
+async def _remove_chat_mute(
+    member: discord.Member,
+    moderator: discord.Member,
+    *,
+    reason: str = "Chat mute removed",
+) -> None:
+    remove_reason = f"{moderator}: {reason}"
+    _cancel_chat_mute_expiry(member.id)
+    await _safe_remove_roles(member, [CHAT_MUTE_ROLE_ID], reason=remove_reason)
+    try:
+        await member.timeout(None, reason=remove_reason)
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print(f"Remove chat mute timeout failed for {member.id}: {exc}")
+
+
+def _is_voice_muted(member: discord.Member) -> bool:
+    voice_mute_role = member.guild.get_role(VOICE_MUTE_ROLE_ID)
+    if voice_mute_role and voice_mute_role in member.roles:
+        return True
+    if member.voice and member.voice.channel and member.voice.mute:
+        return True
+    return False
+
+
+async def _remove_voice_mute(
+    member: discord.Member,
+    moderator: discord.Member,
+    *,
+    reason: str = "Voice mute removed",
+) -> None:
+    remove_reason = f"{moderator}: {reason}"
+    await _safe_remove_roles(member, [VOICE_MUTE_ROLE_ID], reason=remove_reason)
+    if member.voice and member.voice.channel:
+        try:
+            await member.edit(mute=False, reason=remove_reason)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"Remove voice mute failed for {member.id}: {exc}")
+
+
+async def _enforce_chat_mute(message: discord.Message) -> bool:
+    if not message.guild or message.author.bot:
+        return False
+    if not isinstance(message.author, discord.Member):
+        return False
+    if not _is_chat_muted(message.author):
+        return False
+    if not message.guild.me.guild_permissions.manage_messages:
+        return True
+    try:
+        await message.delete()
+    except discord.Forbidden:
+        print(f"Cannot delete chat-muted message in {message.channel.id} (missing Manage Messages)")
+    except discord.HTTPException as exc:
+        print(f"Failed to delete chat-muted message: {exc.text}")
+    return True
+
+
+async def _apply_warn_3_mutes(member: discord.Member, moderator: discord.Member, reason: str) -> None:
+    mute_reason = f"{moderator}: Warn 3 — {reason}"
+    await _apply_chat_mute(member, WARN_3_MUTE_DURATION, moderator, f"Warn 3 — {reason}")
 
     if member.voice and member.voice.channel:
         try:
@@ -1728,7 +1835,7 @@ async def _apply_warn_consequences(
         elif count >= 3:
             await _safe_remove_roles(member, WARN_EARLY_ROLE_IDS, reason=sync_reason)
             await _apply_warn_3_mutes(member, moderator, reason)
-            await _safe_add_roles(member, WARN_3_ROLE_IDS, reason=sync_reason)
+            await _safe_add_roles(member, [VOICE_MUTE_ROLE_ID], reason=sync_reason)
     except discord.Forbidden:
         print(f"Warn {count} role action failed for {member.id}: missing Manage Roles or hierarchy issue")
     except discord.HTTPException as exc:
@@ -3032,11 +3139,10 @@ async def chatmute_cmd(ctx, member: discord.Member, duration: str, *, reason: st
     if not delta or delta > MAX_TIMEOUT:
         return await ctx.send("Invalid duration. Example: `30m`, `2h`, `1d` (max 28 days).", delete_after=10)
 
-    until = discord.utils.utcnow() + delta
     try:
-        await member.timeout(until, reason=f"{ctx.author}: {reason}")
+        await _apply_chat_mute(member, delta, ctx.author, reason)
     except discord.Forbidden:
-        return await ctx.send("I cannot mute this member.", delete_after=8)
+        return await ctx.send("I cannot mute this member (check **Manage Roles** / hierarchy).", delete_after=8)
     except discord.HTTPException as exc:
         return await ctx.send(f"Chat mute failed: {exc.text}", delete_after=8)
 
@@ -3075,6 +3181,60 @@ async def voicemute_cmd(ctx, member: discord.Member, duration: str, *, reason: s
             return await ctx.send(f"Voice mute failed: {exc.text}", delete_after=8)
 
     await _post_punishment_card(ctx, "voicemute", member, reason, duration=delta)
+
+
+@bot.command(name="untimeout", aliases=["unchatmute", "unmutechat"])
+@_punishment_staff_check()
+@commands.bot_has_permissions(moderate_members=True)
+async def untimeout_cmd(ctx, member: discord.Member, *, reason: str = "Chat mute removed"):
+    """Remove chat mute (timeout + chat mute role). Example: !untimeout @user"""
+    if not ctx.author.guild_permissions.moderate_members:
+        return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
+    if not _can_punish_target(ctx.author, member):
+        return await ctx.send("You cannot punish this member.", delete_after=8)
+
+    if not _is_chat_muted(member):
+        return await ctx.send(f"{member.mention} is not chat-muted.", delete_after=8)
+
+    try:
+        await _remove_chat_mute(member, ctx.author, reason=reason)
+    except discord.Forbidden:
+        return await ctx.send("I cannot remove chat mute (check **Manage Roles** / hierarchy).", delete_after=8)
+    except discord.HTTPException as exc:
+        return await ctx.send(f"Untimeout failed: {exc.text}", delete_after=8)
+
+    await ctx.send(f"✅ Chat mute removed for {member.mention}.", delete_after=10)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="unmute", aliases=["unvmute", "unvoicemute"])
+@_punishment_staff_check()
+@commands.bot_has_permissions(moderate_members=True)
+async def unmute_cmd(ctx, member: discord.Member, *, reason: str = "Voice mute removed"):
+    """Remove voice mute (server mute + voice mute role). Example: !unmute @user"""
+    if not ctx.author.guild_permissions.moderate_members:
+        return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
+    if not _can_punish_target(ctx.author, member):
+        return await ctx.send("You cannot punish this member.", delete_after=8)
+
+    if not _is_voice_muted(member):
+        return await ctx.send(f"{member.mention} is not voice-muted.", delete_after=8)
+
+    try:
+        await _remove_voice_mute(member, ctx.author, reason=reason)
+    except discord.Forbidden:
+        return await ctx.send("I cannot remove voice mute (check **Manage Roles** / hierarchy).", delete_after=8)
+    except discord.HTTPException as exc:
+        return await ctx.send(f"Unmute failed: {exc.text}", delete_after=8)
+
+    await ctx.send(f"✅ Voice mute removed for {member.mention}.", delete_after=10)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
 
 
 @bot.command(name="warn", aliases=["warning"])
@@ -3173,6 +3333,9 @@ async def test_punishment_cmd(
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    if await _enforce_chat_mute(message):
         return
 
     try:
