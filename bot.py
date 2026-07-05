@@ -26,6 +26,9 @@ if not TOKEN:
 
 CREATE_CHANNEL_ID = 1517870390968582155
 
+# Category where join-to-create temp voice rooms are created
+TEMP_VOICE_CATEGORY_ID = int(os.getenv("TEMP_VOICE_CATEGORY_ID", "1522403493711712337")) or None
+
 SUPPORT_CHANNEL_ID = 1518020513174130769
 
 VERIFICATION_1_ID = 1517597478378143937
@@ -238,6 +241,14 @@ JOIN_TO_CREATE_CHANNELS = {
 }
 
 
+def _get_temp_voice_category(guild: discord.Guild, trigger_channel: discord.VoiceChannel):
+    if TEMP_VOICE_CATEGORY_ID:
+        category = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
+        if isinstance(category, discord.CategoryChannel):
+            return category
+    return trigger_channel.category
+
+
 async def _create_join_to_create_room(member, trigger_channel):
     """Create a private sub-room when a member joins a join-to-create voice channel."""
     config = JOIN_TO_CREATE_CHANNELS.get(trigger_channel.id)
@@ -245,7 +256,7 @@ async def _create_join_to_create_room(member, trigger_channel):
         return
 
     guild = member.guild
-    category = trigger_channel.category
+    category = _get_temp_voice_category(guild, trigger_channel)
     everyone_role = guild.default_role
     staff_role = guild.get_role(STAFF_ROLE_ID)
     boy_role = guild.get_role(BOY_ROLE_ID)
