@@ -621,6 +621,28 @@ def _get_guild_roles_by_ids(guild: discord.Guild, role_ids: list[int]) -> list[d
     return [role for role_id in role_ids if (role := guild.get_role(role_id))]
 
 
+def _bot_role_assignment_issue(guild: discord.Guild, roles: list[discord.Role]) -> str | None:
+    me = guild.me
+    if not me or not me.guild_permissions.manage_roles:
+        return "El bot ma 3andhouch **Manage Roles**."
+    blocked = [role for role in roles if role.position >= me.top_role.position]
+    if blocked:
+        names = ", ".join(role.name for role in blocked)
+        return (
+            f"Role mta3 el bot (**{me.top_role.name}**) ta7t: **{names}**.\n"
+            "Sa7eh el hierarchy: role el bot lezem ykon **fo9** el roles hedhouma."
+        )
+    return None
+
+
+async def _fetch_human_members(guild: discord.Guild) -> list[discord.Member]:
+    members = []
+    async for member in guild.fetch_members(limit=None):
+        if not member.bot:
+            members.append(member)
+    return members
+
+
 def _get_bot_chat_channel(guild):
     if BOT_CHAT_CHANNEL_ID:
         channel = guild.get_channel(BOT_CHAT_CHANNEL_ID)
@@ -2306,61 +2328,112 @@ async def post_roles_cmd(ctx):
 
 @bot.command(name="syncroles", aliases=["syncjoinroles"])
 @commands.has_permissions(manage_guild=True)
-async def sync_roles_cmd(ctx):
+async def sync_roles_cmd(ctx, member: discord.Member = None):
     """Give the 5 default member roles to all members who are missing them (admin)."""
     guild = ctx.guild
-    status = await ctx.send("⏳ Jari nesta3mlou el roles 3la kol el membres...")
-
-    if not guild.me.guild_permissions.manage_roles:
-        return await status.edit(content="❌ El bot ma 3andhouch **Manage Roles**.")
+    status = await ctx.send("⏳ Jari nesta3mlou el roles...")
 
     roles = _get_guild_roles_by_ids(guild, NEW_MEMBER_ROLE_IDS)
     if not roles:
         return await status.edit(content="❌ Ma l9inahomch el roles fi serveur. Chouf el IDs fi bot.py.")
 
-    if len(roles) < len(NEW_MEMBER_ROLE_IDS):
-        await status.edit(
-            content=f"⚠️ {len(NEW_MEMBER_ROLE_IDS) - len(roles)} role(s) ma l9inahomch. Nkammlou b el li mawjoudin..."
-        )
+    issue = _bot_role_assignment_issue(guild, roles)
+    if issue:
+        return await status.edit(content=f"❌ {issue}")
+
+    reason = f"Role sync by {ctx.author}"
+    role_names = ", ".join(role.name for role in roles)
+
+    if member is not None:
+        try:
+            added = await _assign_missing_roles(member, roles, reason=reason)
+            if added:
+                return await status.edit(
+                    content=f"✅ **{member.display_name}** ta7 el {added} role(s): {role_names}"
+                )
+            return await status.edit(content=f"ℹ️ **{member.display_name}** 3andou deja kol el roles.")
+        except discord.Forbidden:
+            return await status.edit(
+                content=f"❌ Ma najamtech na3ti roles le **{member.display_name}**. Chouf hierarchy mta3 el bot."
+            )
+        except discord.HTTPException as exc:
+            return await status.edit(content=f"❌ Error: {exc.text}")
+
+    await status.edit(content="⏳ Jari nejibou liste el membres...")
 
     try:
-        await guild.chunk()
+        members = await asyncio.wait_for(_fetch_human_members(guild), timeout=120.0)
+    except asyncio.TimeoutError:
+        return await status.edit(
+            content=(
+                "❌ Timeout fi jib el membres (barcha 3bed).\n"
+                "Jarreb: `!syncroles @user` 3la wa7ed wa7ed."
+            )
+        )
+    except discord.Forbidden:
+        return await status.edit(
+            content=(
+                "❌ El bot ma 3andhouch access lel membres.\n"
+                "Chouf **Server Members Intent** fi Discord Developer Portal."
+            )
+        )
     except Exception as e:
-        print(f"syncroles chunk failed: {e}")
+        print(f"syncroles fetch failed: {e}")
+        return await status.edit(content=f"❌ Error fi jib el membres: `{e}`")
+
+    total = len(members)
+    if total == 0:
+        return await status.edit(
+            content="❌ Ma l9inahch membres. Chouf **Server Members Intent** fi Developer Portal."
+        )
 
     updated = 0
     skipped = 0
     failed = 0
-    reason = f"Role sync by {ctx.author}"
+    first_error = None
 
-    for member in guild.members:
-        if member.bot:
-            continue
+    for index, target in enumerate(members, start=1):
         try:
-            added = await _assign_missing_roles(member, roles, reason=reason)
+            added = await _assign_missing_roles(target, roles, reason=reason)
             if added:
                 updated += 1
-                if updated % 20 == 0:
-                    await asyncio.sleep(1)
             else:
                 skipped += 1
         except discord.Forbidden:
             failed += 1
+            if first_error is None:
+                first_error = f"{target.display_name}: bot role ta7t role el membre"
         except discord.HTTPException as exc:
             failed += 1
+            if first_error is None:
+                first_error = f"{target.display_name}: {exc.text}"
             if exc.status == 429:
                 await asyncio.sleep(getattr(exc, "retry_after", 2) or 2)
 
-    role_names = ", ".join(role.name for role in roles)
-    await status.edit(
-        content=(
-            f"✅ **Sync roles kemmel!**\n"
-            f"• **Roles:** {role_names}\n"
-            f"• **Updated:** {updated} membres\n"
-            f"• **Deja 3andhomhom:** {skipped}\n"
-            f"• **Failed:** {failed}"
-        )
-    )
+        if index % 15 == 0 or index == total:
+            try:
+                await status.edit(
+                    content=(
+                        f"⏳ Jari... **{index}/{total}**\n"
+                        f"• Updated: **{updated}** | Skipped: **{skipped}** | Failed: **{failed}**"
+                    )
+                )
+            except discord.HTTPException:
+                pass
+
+    lines = [
+        "✅ **Sync roles kemmel!**",
+        f"• **Roles:** {role_names}",
+        f"• **Updated:** {updated}",
+        f"• **Deja 3andhomhom:** {skipped}",
+        f"• **Failed:** {failed}",
+    ]
+    if failed and first_error:
+        lines.append(f"• **Awel error:** {first_error}")
+    if updated == 0 and failed == 0:
+        lines.insert(0, "ℹ️ Kol el membres 3andhom deja el roles.")
+
+    await status.edit(content="\n".join(lines))
 
 
 @bot.command(name="ticketpanel", aliases=["go"])
