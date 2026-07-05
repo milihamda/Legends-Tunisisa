@@ -56,6 +56,33 @@ STAFF_ROLE_IDS = [
     # 1517586424306598140,
 ]
 
+TICKET_PANEL_CHANNEL_ID = 1522527871887998987
+TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "0")) or None
+
+TICKET_CATEGORIES = {
+    "support": {
+        "label": "Support",
+        "emoji": "🛡️",
+        "description": "General help and questions",
+        "button_style": discord.ButtonStyle.primary,
+    },
+    "report": {
+        "label": "Report",
+        "emoji": "⚠️",
+        "description": "Report a user or rule break",
+        "button_style": discord.ButtonStyle.danger,
+    },
+    "bugs": {
+        "label": "Bugs",
+        "emoji": "🐛",
+        "description": "Report a bug or technical issue",
+        "button_style": discord.ButtonStyle.secondary,
+    },
+}
+
+TICKET_PANEL_TITLE = "🎫 Support Tickets"
+TICKET_TOPIC_PREFIX = "legends-ticket:"
+
 LEVEL_LOG_CHANNEL_ID = 1517921554510385242
 PUNISHMENT_LOG_CHANNEL_ID = 1522676265381793876
 
@@ -172,6 +199,9 @@ DATA_DIR = Path("data")
 DB_FILE = str(DATA_DIR / "levels_database.json")
 LEGACY_DB_FILE = "levels_database.json"
 bot_chat_messages = {}
+ticket_counters: dict[int, int] = {}
+open_tickets_by_user: dict[int, int] = {}
+ticket_channels: dict[int, dict] = {}
 WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
 user_warnings: dict[int, int] = {}
 MAX_WARNS_BEFORE_BAN = 3
@@ -569,6 +599,323 @@ async def _refresh_bot_chat_welcome_message(guild):
     bot_chat_messages[guild.id] = message.id
 
 
+def _ticket_topic(user_id: int, category_key: str) -> str:
+    return f"{TICKET_TOPIC_PREFIX}uid={user_id};cat={category_key}"
+
+
+def _parse_ticket_topic(topic: str | None) -> dict | None:
+    if not topic or not topic.startswith(TICKET_TOPIC_PREFIX):
+        return None
+    payload = topic[len(TICKET_TOPIC_PREFIX) :]
+    data = {}
+    for part in payload.split(";"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        data[key] = value
+    if "uid" not in data or "cat" not in data:
+        return None
+    try:
+        data["uid"] = int(data["uid"])
+    except ValueError:
+        return None
+    return data
+
+
+def _sanitize_ticket_slug(name: str, *, max_len: int = 18) -> str:
+    cleaned = re.sub(r"[^a-z0-9-]", "", name.lower().replace(" ", "-"))
+    return (cleaned[:max_len] or "user")
+
+
+def _get_ticket_panel_channel(guild: discord.Guild):
+    if TICKET_PANEL_CHANNEL_ID:
+        channel = guild.get_channel(TICKET_PANEL_CHANNEL_ID)
+        if channel:
+            return channel
+    return None
+
+
+def _get_ticket_category(guild: discord.Guild, panel_channel: discord.TextChannel | None):
+    if TICKET_CATEGORY_ID:
+        return guild.get_channel(TICKET_CATEGORY_ID)
+    if panel_channel and panel_channel.category:
+        return panel_channel.category
+    return None
+
+
+def _get_staff_ticket_roles(guild: discord.Guild):
+    role_ids = {STAFF_ROLE_ID, *SUPPORT_NOTIFY_ROLE_IDS}
+    roles = []
+    seen = set()
+    for role_id in role_ids:
+        if role_id in seen:
+            continue
+        seen.add(role_id)
+        role = guild.get_role(role_id)
+        if role:
+            roles.append(role)
+    return roles
+
+
+def _build_ticket_panel_embed() -> discord.Embed:
+    lines = "\n".join(
+        f"{cat['emoji']} **{cat['label']}** — {cat['description']}"
+        for cat in TICKET_CATEGORIES.values()
+    )
+    return discord.Embed(
+        title=TICKET_PANEL_TITLE,
+        description=(
+            "Need help? Open a private ticket using one of the buttons below.\n"
+            "Staff will respond as soon as possible.\n\n"
+            f"{lines}"
+        ),
+        color=discord.Color.from_rgb(88, 101, 242),
+    ).set_footer(text="One open ticket per member • Legends Tunisia")
+
+
+def _build_ticket_welcome_embed(
+    member: discord.Member,
+    category_key: str,
+    *,
+    ticket_number: int,
+) -> discord.Embed:
+    category = TICKET_CATEGORIES[category_key]
+    return discord.Embed(
+        title=f"{category['emoji']} {category['label']} Ticket #{ticket_number:04d}",
+        description=(
+            f"Hello {member.mention}!\n\n"
+            "Please describe your issue in as much detail as possible. "
+            "A staff member will assist you shortly.\n\n"
+            "When you are done, use **Close Ticket** below."
+        ),
+        color=discord.Color.green(),
+    ).set_footer(text=f"Opened by {member} • {category['label']}")
+
+
+def _register_ticket_channel(channel: discord.TextChannel, user_id: int, category_key: str):
+    open_tickets_by_user[user_id] = channel.id
+    ticket_channels[channel.id] = {
+        "user_id": user_id,
+        "category": category_key,
+    }
+
+
+def _unregister_ticket_channel(channel_id: int):
+    info = ticket_channels.pop(channel_id, None)
+    if info:
+        open_tickets_by_user.pop(info["user_id"], None)
+
+
+def _next_ticket_number(guild_id: int) -> int:
+    ticket_counters[guild_id] = ticket_counters.get(guild_id, 0) + 1
+    return ticket_counters[guild_id]
+
+
+def _can_manage_ticket(member: discord.Member, ticket_owner_id: int) -> bool:
+    if member.id == ticket_owner_id:
+        return True
+    if member.guild_permissions.manage_channels:
+        return True
+    return _member_has_any_role(member, [STAFF_ROLE_ID, *SUPPORT_NOTIFY_ROLE_IDS])
+
+
+async def _create_text_ticket(interaction: discord.Interaction, category_key: str):
+    if category_key not in TICKET_CATEGORIES:
+        return await interaction.response.send_message("Unknown ticket category.", ephemeral=True)
+
+    if not interaction.guild:
+        return await interaction.response.send_message("Tickets only work inside a server.", ephemeral=True)
+
+    member = interaction.user
+    if member.id in open_tickets_by_user:
+        existing = interaction.guild.get_channel(open_tickets_by_user[member.id])
+        if existing:
+            return await interaction.response.send_message(
+                f"You already have an open ticket: {existing.mention}",
+                ephemeral=True,
+            )
+        open_tickets_by_user.pop(member.id, None)
+
+    await interaction.response.defer(ephemeral=True)
+
+    guild = interaction.guild
+    panel_channel = _get_ticket_panel_channel(guild)
+    category = _get_ticket_category(guild, panel_channel)
+    ticket_number = _next_ticket_number(guild.id)
+    category_meta = TICKET_CATEGORIES[category_key]
+    slug = _sanitize_ticket_slug(member.name)
+    channel_name = f"ticket-{category_key}-{slug}-{ticket_number:04d}"
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        member: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+            embed_links=True,
+        ),
+    }
+    for role in _get_staff_ticket_roles(guild):
+        overwrites[role] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+            embed_links=True,
+            manage_messages=True,
+        )
+    if guild.me:
+        overwrites[guild.me] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            manage_channels=True,
+            manage_messages=True,
+        )
+
+    try:
+        ticket_channel = await guild.create_text_channel(
+            name=channel_name[:100],
+            category=category,
+            overwrites=overwrites,
+            topic=_ticket_topic(member.id, category_key),
+            reason=f"Ticket opened by {member} ({category_key})",
+        )
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            "I cannot create ticket channels. Check my **Manage Channels** permission.",
+            ephemeral=True,
+        )
+    except discord.HTTPException as exc:
+        return await interaction.followup.send(
+            f"Could not create your ticket right now. ({exc.text})",
+            ephemeral=True,
+        )
+
+    _register_ticket_channel(ticket_channel, member.id, category_key)
+
+    close_view = TicketCloseView(ticket_channel.id)
+    bot.add_view(close_view)
+
+    staff_role = guild.get_role(STAFF_ROLE_ID)
+    ping_parts = [member.mention]
+    if staff_role:
+        ping_parts.append(staff_role.mention)
+    await ticket_channel.send(
+        " ".join(ping_parts),
+        embed=_build_ticket_welcome_embed(member, category_key, ticket_number=ticket_number),
+        view=close_view,
+    )
+
+    alert = discord.Embed(
+        title=f"NEW {category_meta['label'].upper()} TICKET",
+        description=(
+            f"**User:** {member.mention} (`{member.name}`)\n"
+            f"**Category:** {category_meta['emoji']} {category_meta['label']}\n"
+            f"**Channel:** {ticket_channel.mention}"
+        ),
+        color=discord.Color.orange(),
+    )
+    await _notify_roles_members(guild, STAFF_ROLE_IDS, alert)
+
+    await interaction.followup.send(
+        f"Your ticket was created: {ticket_channel.mention}",
+        ephemeral=True,
+    )
+
+
+async def _close_text_ticket(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    *,
+    reason: str = "Closed",
+):
+    info = ticket_channels.get(channel.id) or _parse_ticket_topic(channel.topic)
+    if isinstance(info, dict) and "user_id" in info:
+        owner_id = info["user_id"]
+    elif isinstance(info, dict) and "uid" in info:
+        owner_id = info["uid"]
+    else:
+        owner_id = None
+
+    if owner_id is None:
+        return await interaction.response.send_message("This is not an active ticket channel.", ephemeral=True)
+
+    if not _can_manage_ticket(interaction.user, owner_id):
+        return await interaction.response.send_message(
+            "Only the ticket owner or staff can close this ticket.",
+            ephemeral=True,
+        )
+
+    await interaction.response.defer(ephemeral=True)
+    _unregister_ticket_channel(channel.id)
+
+    closer = interaction.user.display_name
+    try:
+        await channel.send(
+            embed=discord.Embed(
+                title="Ticket Closed",
+                description=f"Closed by {interaction.user.mention}\n**Reason:** {reason}",
+                color=discord.Color.red(),
+            )
+        )
+        await channel.delete(reason=f"Ticket closed by {closer}: {reason}")
+    except discord.Forbidden:
+        return await interaction.followup.send(
+            "I cannot delete this ticket channel.",
+            ephemeral=True,
+        )
+    except discord.HTTPException as exc:
+        return await interaction.followup.send(
+            f"Could not close the ticket. ({exc.text})",
+            ephemeral=True,
+        )
+
+    await interaction.followup.send("Ticket closed.", ephemeral=True)
+
+
+async def _ensure_ticket_panel(guild: discord.Guild):
+    channel = _get_ticket_panel_channel(guild)
+    if not channel:
+        return
+
+    try:
+        async for message in channel.history(limit=25):
+            if message.author.id != bot.user.id:
+                continue
+            if not message.embeds:
+                continue
+            if message.embeds[0].title == TICKET_PANEL_TITLE:
+                return
+    except discord.Forbidden:
+        return
+
+    await channel.send(embed=_build_ticket_panel_embed(), view=TicketPanelView())
+
+
+async def _register_existing_ticket_channels(guild: discord.Guild):
+    max_number = ticket_counters.get(guild.id, 0)
+    for channel in guild.text_channels:
+        info = _parse_ticket_topic(channel.topic)
+        if not info:
+            continue
+
+        ticket_channels[channel.id] = {
+            "user_id": info["uid"],
+            "category": info["cat"],
+        }
+        open_tickets_by_user[info["uid"]] = channel.id
+        bot.add_view(TicketCloseView(channel.id))
+
+        match = re.search(r"-(\d{4})$", channel.name)
+        if match:
+            max_number = max(max_number, int(match.group(1)))
+
+    if max_number:
+        ticket_counters[guild.id] = max(ticket_counters.get(guild.id, 0), max_number)
+
+
 _JOIN_TO_CREATE_HUB_IDS = frozenset(JOIN_TO_CREATE_CHANNELS.keys())
 
 
@@ -798,6 +1145,50 @@ class GameRolePickerView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(GameRoleSelect())
+
+
+class TicketOpenButton(discord.ui.Button):
+    def __init__(self, category_key: str, category: dict):
+        super().__init__(
+            label=category["label"],
+            emoji=category.get("emoji"),
+            style=category.get("button_style", discord.ButtonStyle.secondary),
+            custom_id=f"legends_ticket_open:{category_key}",
+        )
+        self.category_key = category_key
+
+    async def callback(self, interaction: discord.Interaction):
+        await _create_text_ticket(interaction, self.category_key)
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        for key, category in TICKET_CATEGORIES.items():
+            self.add_item(TicketOpenButton(key, category))
+
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        close_btn = discord.ui.Button(
+            label="Close Ticket",
+            emoji="🔒",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"legends_ticket_close:{channel_id}",
+        )
+        close_btn.callback = self.close_button
+        self.add_item(close_btn)
+
+    async def close_button(self, interaction: discord.Interaction):
+        channel = interaction.guild.get_channel(self.channel_id) if interaction.guild else None
+        if not isinstance(channel, discord.TextChannel):
+            return await interaction.response.send_message(
+                "This ticket channel no longer exists.",
+                ephemeral=True,
+            )
+        await _close_text_ticket(interaction, channel, reason="Closed from panel")
 
 
 class DummyVoiceClient(discord.VoiceProtocol):
@@ -1284,11 +1675,13 @@ async def on_ready():
 
     _start_background_tasks()
     bot.add_view(GameRolePickerView())
+    bot.add_view(TicketPanelView())
 
     for guild in bot.guilds:
         try:
             await guild.chunk()
             await _cleanup_and_register_temp_rooms(guild)
+            await _register_existing_ticket_channels(guild)
             for channel_id in list(room_kinds.keys()):
                 ch = guild.get_channel(channel_id)
                 emojis = _get_panel_emojis(guild) if ch else PANEL_EMOJI_FALLBACKS
@@ -1299,6 +1692,7 @@ async def on_ready():
             elif not success and SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS:
                 print(f"{guild.name}: {message}")
             await _refresh_bot_chat_welcome_message(guild)
+            await _ensure_ticket_panel(guild)
         except Exception as e:
             print(f"Guild init failed for {guild.name}: {e}")
 
@@ -1621,6 +2015,55 @@ async def post_roles_cmd(ctx):
         await ctx.message.delete()
     except discord.Forbidden:
         pass
+
+
+@bot.command(name="ticketpanel")
+@commands.has_permissions(manage_guild=True)
+async def ticket_panel_cmd(ctx):
+    """Post the text ticket panel (admin only)."""
+    target = ctx.channel
+    if TICKET_PANEL_CHANNEL_ID:
+        panel_channel = ctx.guild.get_channel(TICKET_PANEL_CHANNEL_ID)
+        if panel_channel:
+            target = panel_channel
+
+    await target.send(embed=_build_ticket_panel_embed(), view=TicketPanelView())
+    if target.id != ctx.channel.id:
+        await ctx.send(f"Ticket panel posted in {target.mention}.", delete_after=8)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="closeticket")
+async def close_ticket_cmd(ctx, *, reason: str = "Closed by staff"):
+    """Close the current ticket channel."""
+    if not isinstance(ctx.channel, discord.TextChannel):
+        return await ctx.send("Run this command inside a ticket channel.", delete_after=8)
+
+    info = ticket_channels.get(ctx.channel.id) or _parse_ticket_topic(ctx.channel.topic)
+    if not info:
+        return await ctx.send("This channel is not a ticket.", delete_after=8)
+
+    owner_id = info.get("user_id") or info.get("uid")
+    if not _can_manage_ticket(ctx.author, owner_id):
+        return await ctx.send("Only the ticket owner or staff can close this ticket.", delete_after=8)
+
+    _unregister_ticket_channel(ctx.channel.id)
+    try:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Ticket Closed",
+                description=f"Closed by {ctx.author.mention}\n**Reason:** {reason}",
+                color=discord.Color.red(),
+            )
+        )
+        await ctx.channel.delete(reason=f"Ticket closed by {ctx.author}: {reason}")
+    except discord.Forbidden:
+        await ctx.send("I cannot delete this ticket channel.", delete_after=8)
+    except discord.HTTPException as exc:
+        await ctx.send(f"Could not close the ticket. ({exc.text})", delete_after=8)
 
 
 @bot.command(name="post", aliases=["say", "echo"])
