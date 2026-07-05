@@ -30,10 +30,10 @@ FONT_SIZE_RATIO = 0.042
 TEXT_COLOR = "#d4a574"
 MAX_FIELD_LEN = 48
 
-# Punished member avatar (replaces Discord logo circle, bottom-left)
-AVATAR_SIZE_RATIO = 0.155
-AVATAR_CENTER_X_RATIO = 0.075
-AVATAR_CENTER_Y_RATIO = 0.84
+# Punished member avatar (right side — sky area above palm trees)
+AVATAR_SIZE_RATIO = 0.19
+AVATAR_CENTER_X_RATIO = 0.58
+AVATAR_CENTER_Y_RATIO = 0.40
 AVATAR_RING_RATIO = 0.009
 AVATAR_RING_COLOR = "#6b4f1d"
 
