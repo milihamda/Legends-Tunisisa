@@ -27,7 +27,10 @@ if not TOKEN:
 CREATE_CHANNEL_ID = 1517870390968582155
 
 # Category where join-to-create temp voice rooms are created
-TEMP_VOICE_CATEGORY_ID = int(os.getenv("TEMP_VOICE_CATEGORY_ID", "1522403493711712337")) or None
+TEMP_VOICE_CATEGORY_ID = 1522403493711712337
+_env_temp_cat = os.getenv("TEMP_VOICE_CATEGORY_ID", "").strip()
+if _env_temp_cat:
+    TEMP_VOICE_CATEGORY_ID = int(_env_temp_cat)
 
 SUPPORT_CHANNEL_ID = 1518020513174130769
 
@@ -242,10 +245,60 @@ JOIN_TO_CREATE_CHANNELS = {
 
 
 def _get_temp_voice_category(guild: discord.Guild, trigger_channel: discord.VoiceChannel):
-    if TEMP_VOICE_CATEGORY_ID:
-        category = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
-        if isinstance(category, discord.CategoryChannel):
-            return category
+    """Sync lookup — prefer _resolve_temp_voice_category when creating rooms."""
+    if not TEMP_VOICE_CATEGORY_ID:
+        return trigger_channel.category
+    category = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
+    if category:
+        return category
+    channel = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
+    if isinstance(channel, discord.CategoryChannel):
+        return channel
+    if isinstance(channel, discord.abc.GuildChannel) and channel.category:
+        return channel.category
+    return trigger_channel.category
+
+
+async def _resolve_temp_voice_category(
+    guild: discord.Guild,
+    trigger_channel: discord.VoiceChannel,
+) -> discord.CategoryChannel | None:
+    """Resolve target category for temp voice rooms (fetch + fallbacks)."""
+    if not TEMP_VOICE_CATEGORY_ID:
+        return trigger_channel.category
+
+    category = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
+    if category:
+        return category
+
+    channel = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(TEMP_VOICE_CATEGORY_ID)
+        except discord.HTTPException as exc:
+            print(
+                f"WARNING: TEMP_VOICE_CATEGORY_ID {TEMP_VOICE_CATEGORY_ID} not found "
+                f"({exc}). Using trigger channel category."
+            )
+            return trigger_channel.category
+
+    if isinstance(channel, discord.CategoryChannel):
+        return channel
+
+    if isinstance(channel, discord.abc.GuildChannel) and channel.category:
+        print(
+            f"TEMP_VOICE: ID {TEMP_VOICE_CATEGORY_ID} is #{channel.name} "
+            f"— using its parent category **{channel.category.name}**."
+        )
+        return channel.category
+
+    print(
+        f"WARNING: TEMP_VOICE_CATEGORY_ID {TEMP_VOICE_CATEGORY_ID} is "
+        f"{type(channel).__name__} with no parent category. "
+        f"Use a **category** ID (right-click category → Copy ID). "
+        f"Falling back to trigger category: "
+        f"{trigger_channel.category.name if trigger_channel.category else 'none'}."
+    )
     return trigger_channel.category
 
 
@@ -256,7 +309,7 @@ async def _create_join_to_create_room(member, trigger_channel):
         return
 
     guild = member.guild
-    category = _get_temp_voice_category(guild, trigger_channel)
+    category = await _resolve_temp_voice_category(guild, trigger_channel)
     everyone_role = guild.default_role
     staff_role = guild.get_role(STAFF_ROLE_ID)
     boy_role = guild.get_role(BOY_ROLE_ID)
@@ -311,6 +364,8 @@ async def _create_join_to_create_room(member, trigger_channel):
         category=category,
         overwrites=overwrites,
     )
+    cat_label = f"{category.name} ({category.id})" if category else "no category"
+    print(f"Temp room created: {new_channel.name} → category {cat_label}")
     owners[new_channel.id] = member.id
     room_kinds[new_channel.id] = config["kind"]
     await member.move_to(new_channel)
