@@ -33,7 +33,7 @@ MAX_FIELD_LEN = 48
 # Punished member avatar (right side — sky area above palm trees)
 AVATAR_SIZE_RATIO = 0.19
 AVATAR_CENTER_X_RATIO = 0.84
-AVATAR_CENTER_Y_RATIO = 0.40
+AVATAR_CENTER_Y_RATIO = 0.50
 AVATAR_RING_RATIO = 0.009
 AVATAR_RING_COLOR = "#6b4f1d"
 
