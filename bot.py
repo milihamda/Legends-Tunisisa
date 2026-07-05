@@ -64,22 +64,26 @@ _env_ticket_cat = os.getenv("TICKET_CATEGORY_ID", "").strip()
 if _env_ticket_cat and _env_ticket_cat not in ("0", "none", "false"):
     TICKET_CATEGORY_ID = int(_env_ticket_cat)
 
+TICKET_EMOJI_SUPPORT = discord.PartialEmoji(name="51395", id=1523430687493984417)
+TICKET_EMOJI_REPORT = discord.PartialEmoji(name="51795", id=1523430684150988894)
+TICKET_EMOJI_BUGS = discord.PartialEmoji(name="51796", id=1523430685740630026)
+
 TICKET_CATEGORIES = {
     "support": {
         "label": "Support",
-        "emoji": "🛡️",
+        "emoji": TICKET_EMOJI_SUPPORT,
         "description": "General help and questions",
         "button_style": discord.ButtonStyle.primary,
     },
     "report": {
         "label": "Report",
-        "emoji": "⚠️",
+        "emoji": TICKET_EMOJI_REPORT,
         "description": "Report a user or rule break",
         "button_style": discord.ButtonStyle.danger,
     },
     "bugs": {
         "label": "Bugs",
-        "emoji": "🐛",
+        "emoji": TICKET_EMOJI_BUGS,
         "description": "Report a bug or technical issue",
         "button_style": discord.ButtonStyle.secondary,
     },
@@ -746,9 +750,15 @@ def _get_staff_ticket_roles(guild: discord.Guild):
     return roles
 
 
+def _ticket_emoji_display(emoji) -> str:
+    if isinstance(emoji, discord.PartialEmoji):
+        return str(emoji)
+    return str(emoji) if emoji else ""
+
+
 def _build_ticket_panel_embed() -> discord.Embed:
     lines = "\n".join(
-        f"{cat['emoji']} **{cat['label']}** — {cat['description']}"
+        f"{_ticket_emoji_display(cat['emoji'])} **{cat['label']}** — {cat['description']}"
         for cat in TICKET_CATEGORIES.values()
     )
     return discord.Embed(
@@ -770,7 +780,7 @@ def _build_ticket_welcome_embed(
 ) -> discord.Embed:
     category = TICKET_CATEGORIES[category_key]
     return discord.Embed(
-        title=f"{category['emoji']} {category['label']} Ticket #{ticket_number:04d}",
+        title=f"{_ticket_emoji_display(category['emoji'])} {category['label']} Ticket #{ticket_number:04d}",
         description=(
             f"Hello {member.mention}!\n\n"
             "Please describe your issue in as much detail as possible. "
