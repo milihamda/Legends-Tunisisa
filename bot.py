@@ -97,6 +97,7 @@ DATA_BACKUP_CHANNEL_ID = 1518023858765168771
 BOT_VOICE_CHANNEL_ID = 1518025649225470072
 BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"))
 BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "welcome to Bot-Chat")
+BOT_BUILD_ID = "2026-07-05-backup-v2"
 
 # Server default: chat/voice-text notifications only on @mentions (not every message)
 SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS = os.getenv(
@@ -662,7 +663,8 @@ async def _refresh_bot_chat_welcome_message(guild):
         except discord.Forbidden:
             return
 
-    message = await channel.send(BOT_CHAT_MESSAGE)
+    chat_text = (BOT_CHAT_MESSAGE or "welcome to Bot-Chat")[:2000]
+    message = await channel.send(chat_text)
     bot_chat_messages[guild.id] = message.id
 
 
@@ -1407,19 +1409,19 @@ async def save_database_to_discord():
     try:
         formatted_data = {str(k): v for k, v in user_levels.items()}
         json_bytes = json.dumps(formatted_data, ensure_ascii=False, indent=2).encode("utf-8")
-        backup_file = discord.File(io.BytesIO(json_bytes), filename="levels_database.json")
-        backup_message = await channel.send(
-            content="**AUTOMATIC DATA BACKUP SECURED** — see attached `levels_database.json`.",
-            embed=discord.Embed(
-                title="AUTOMATIC DATA BACKUP SECURED",
-                description=(
-                    "Automated backup for server voice levels.\n"
-                    "**DO NOT DELETE THIS MESSAGE.**"
-                ),
-                color=discord.Color.green(),
+        buffer = io.BytesIO(json_bytes)
+        buffer.seek(0)
+        backup_file = discord.File(buffer, filename="levels_database.json")
+        backup_embed = discord.Embed(
+            title="AUTOMATIC DATA BACKUP SECURED",
+            description=(
+                "Automated backup for server voice levels.\n"
+                "**DO NOT DELETE THIS MESSAGE.**\n"
+                "Attachment: `levels_database.json`"
             ),
-            file=backup_file,
+            color=discord.Color.green(),
         )
+        backup_message = await channel.send(embed=backup_embed, file=backup_file)
         try:
             await channel.purge(
                 limit=10,
@@ -1735,7 +1737,7 @@ class ControlPanelView(discord.ui.View):
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    print(f"Logged in as {bot.user} (build {BOT_BUILD_ID})")
 
     await load_database_from_discord()
     _load_warnings()
