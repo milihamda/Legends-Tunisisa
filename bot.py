@@ -1850,6 +1850,28 @@ async def _apply_warn_consequences(
         print(f"Warn {count} role action failed for {member.id}: {exc.text}")
 
 
+async def _sync_warn_roles_after_count(
+    member: discord.Member,
+    count: int,
+    moderator: discord.Member,
+    *,
+    reason: str = "Warnings cleared",
+) -> None:
+    """Remove warn roles/mutes that no longer match the warning count."""
+    sync_reason = f"{moderator}: {reason}"
+    try:
+        if count < 2:
+            await _safe_remove_roles(member, [WARN_2_ROLE_ID], reason=sync_reason)
+        if count < 1:
+            await _safe_remove_roles(member, [WARN_1_ROLE_ID], reason=sync_reason)
+            await _remove_chat_mute(member, moderator, reason=sync_reason)
+            await _remove_voice_mute(member, moderator, reason=sync_reason)
+    except discord.Forbidden:
+        print(f"Warn role sync failed for {member.id}: missing Manage Roles or hierarchy issue")
+    except discord.HTTPException as exc:
+        print(f"Warn role sync failed for {member.id}: {exc.text}")
+
+
 class KickUserSelect(discord.ui.Select):
     def __init__(self, channel):
         self.channel = channel
@@ -3281,7 +3303,7 @@ async def warnings_cmd(ctx, member: discord.Member = None):
 @_punishment_staff_check()
 async def clearwarn_cmd(ctx, member: discord.Member, amount: str = "all"):
     """
-    Remove warning(s) from a member.
+    Remove warning(s) from a member and sync warn roles/mutes.
     !clearwarn @user       → remove all warnings
     !clearwarn @user 1     → remove one warning
     """
@@ -3295,6 +3317,7 @@ async def clearwarn_cmd(ctx, member: discord.Member, amount: str = "all"):
     token = (amount or "all").strip().lower()
     if token == "all":
         _clear_warnings(member.id)
+        remaining = 0
         msg = f"All warnings cleared for {member.mention} (was **{current}/{MAX_WARNS_BEFORE_BAN}**)."
     else:
         try:
@@ -3304,13 +3327,20 @@ async def clearwarn_cmd(ctx, member: discord.Member, amount: str = "all"):
         if remove_count <= 0:
             return await ctx.send("Amount must be at least 1.", delete_after=8)
         for _ in range(min(remove_count, current)):
-            remaining = _remove_warning(member.id)
+            _remove_warning(member.id)
+        remaining = _get_warning_count(member.id)
         msg = (
             f"Removed **{min(remove_count, current)}** warning(s) from {member.mention}. "
             f"Now **{remaining}/{MAX_WARNS_BEFORE_BAN}**."
         )
 
-    await ctx.send(msg, delete_after=10)
+    try:
+        await _sync_warn_roles_after_count(member, remaining, ctx.author, reason="Warnings cleared")
+    except Exception as exc:
+        print(f"clearwarn role sync failed for {member.id}: {exc}")
+        msg += "\n⚠️ Counter updated, but some roles/mutes could not be removed."
+
+    await ctx.send(msg, delete_after=12)
     try:
         await ctx.message.delete()
     except discord.Forbidden:
