@@ -3058,9 +3058,12 @@ async def _post_punishment_card(
     duration: timedelta | None = None,
     extra_note: str | None = None,
     preview: bool = False,
+    punisher: discord.abc.User | None = None,
+    finish_command: bool = True,
 ):
+    moderator = punisher or ctx.author
     try:
-        buffer = await build_punishment_card(target, ctx.author, reason, punishment_type)
+        buffer = await build_punishment_card(target, moderator, reason, punishment_type)
     except Exception as exc:
         print(f"Punishment card build failed ({punishment_type}): {exc}")
         await ctx.send(f"Punishment card failed: {exc}", delete_after=12)
@@ -3096,7 +3099,8 @@ async def _post_punishment_card(
         await ctx.send(f"Punishment post failed: {exc}", delete_after=12)
         return False
 
-    await _finish_staff_command(ctx, True, log_channel)
+    if finish_command:
+        await _finish_staff_command(ctx, True, log_channel)
     return True
 
 
@@ -3270,7 +3274,8 @@ async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason prov
     await _apply_warn_consequences(member, count, ctx.author, reason)
 
     card_note = f"**({count}/{MAX_WARNS_BEFORE_BAN})**"
-    if count >= MAX_WARNS_BEFORE_BAN:
+    is_warn_3 = count >= MAX_WARNS_BEFORE_BAN
+    if is_warn_3:
         _clear_warnings(member.id)
         card_note = f"**({MAX_WARNS_BEFORE_BAN}/{MAX_WARNS_BEFORE_BAN})**"
 
@@ -3280,7 +3285,30 @@ async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason prov
         member,
         reason,
         extra_note=card_note,
+        finish_command=not is_warn_3,
     )
+
+    if is_warn_3:
+        bot_member = ctx.guild.me
+        warn3_reason = "3 warn"
+        await _post_punishment_card(
+            ctx,
+            "chatmute",
+            member,
+            warn3_reason,
+            duration=WARN_3_MUTE_DURATION,
+            punisher=bot_member,
+            finish_command=False,
+        )
+        await _post_punishment_card(
+            ctx,
+            "voicemute",
+            member,
+            warn3_reason,
+            duration=WARN_3_MUTE_DURATION,
+            punisher=bot_member,
+            finish_command=True,
+        )
 
 
 @bot.command(name="warnings", aliases=["warns", "getwarns"])
