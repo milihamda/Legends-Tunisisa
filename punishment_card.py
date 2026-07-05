@@ -30,6 +30,13 @@ FONT_SIZE_RATIO = 0.042
 TEXT_COLOR = "#d4a574"
 MAX_FIELD_LEN = 48
 
+# Punished member avatar (replaces Discord logo circle, bottom-left)
+AVATAR_SIZE_RATIO = 0.155
+AVATAR_CENTER_X_RATIO = 0.075
+AVATAR_CENTER_Y_RATIO = 0.84
+AVATAR_RING_RATIO = 0.009
+AVATAR_RING_COLOR = "#6b4f1d"
+
 
 def _load_font(size: int):
     for path in (
@@ -60,6 +67,44 @@ def _display_name(member) -> str:
     return member.display_name or member.name
 
 
+async def _load_member_avatar(member) -> Image.Image:
+    avatar_bytes = await member.display_avatar.replace(size=512, format="png").read()
+    return Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+
+
+def _build_circular_avatar(avatar: Image.Image, inner_size: int, ring_width: int) -> Image.Image:
+    outer_size = inner_size + ring_width * 2
+    framed = Image.new("RGBA", (outer_size, outer_size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(framed)
+    draw.ellipse((0, 0, outer_size - 1, outer_size - 1), fill=AVATAR_RING_COLOR)
+    draw.ellipse(
+        (ring_width, ring_width, outer_size - ring_width - 1, outer_size - ring_width - 1),
+        fill="#1a0a0a",
+    )
+
+    avatar = avatar.resize((inner_size, inner_size))
+    mask = Image.new("L", (inner_size, inner_size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, inner_size, inner_size), fill=255)
+
+    circular = Image.new("RGBA", (inner_size, inner_size), (0, 0, 0, 0))
+    circular.paste(avatar, (0, 0), mask=mask)
+    framed.paste(circular, (ring_width, ring_width), circular)
+    return framed
+
+
+def _paste_member_avatar(canvas: Image.Image, avatar: Image.Image) -> None:
+    width, height = canvas.size
+    inner_size = max(48, int(height * AVATAR_SIZE_RATIO))
+    ring_width = max(3, int(height * AVATAR_RING_RATIO))
+    framed = _build_circular_avatar(avatar, inner_size, ring_width)
+
+    center_x = int(width * AVATAR_CENTER_X_RATIO)
+    center_y = int(height * AVATAR_CENTER_Y_RATIO)
+    x = center_x - framed.width // 2
+    y = center_y - framed.height // 2
+    canvas.paste(framed, (x, y), framed)
+
+
 async def build_punishment_card(
     member,
     punisher,
@@ -76,6 +121,12 @@ async def build_punishment_card(
     width, height = canvas.size
     draw = ImageDraw.Draw(canvas)
     font = _load_font(max(14, int(height * FONT_SIZE_RATIO)))
+
+    try:
+        avatar = await _load_member_avatar(member)
+        _paste_member_avatar(canvas, avatar)
+    except Exception as exc:
+        print(f"Punishment avatar overlay failed for {member.id}: {exc}")
 
     text_x = int(width * TEXT_X_RATIO)
     lines = (
