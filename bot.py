@@ -229,6 +229,16 @@ ticket_channels: dict[int, dict] = {}
 WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
 user_warnings: dict[int, int] = {}
 MAX_WARNS_BEFORE_BAN = 3
+
+WARN_1_ROLE_ID = 1523000242491097208
+WARN_2_ROLE_ID = 1523000417758347274
+WARN_3_ROLE_IDS = (
+    1523000899692138668,
+    1523473905237495839,
+)
+WARN_EARLY_ROLE_IDS = (WARN_1_ROLE_ID, WARN_2_ROLE_ID)
+WARN_3_MUTE_DURATION = timedelta(days=1)
+
 active_giveaways: dict[int, asyncio.Event] = {}
 current_giveaway_view = None
 
@@ -1672,6 +1682,59 @@ def _remove_warning(user_id: int) -> int:
     return user_warnings.get(user_id, 0)
 
 
+async def _safe_add_roles(member: discord.Member, role_ids, *, reason: str) -> None:
+    roles = [role for role_id in role_ids if (role := member.guild.get_role(role_id))]
+    roles = [role for role in roles if role not in member.roles]
+    if not roles:
+        return
+    await member.add_roles(*roles, reason=reason)
+
+
+async def _safe_remove_roles(member: discord.Member, role_ids, *, reason: str) -> None:
+    roles = [role for role_id in role_ids if (role := member.guild.get_role(role_id))]
+    roles = [role for role in roles if role in member.roles]
+    if not roles:
+        return
+    await member.remove_roles(*roles, reason=reason)
+
+
+async def _apply_warn_3_mutes(member: discord.Member, moderator: discord.Member, reason: str) -> None:
+    mute_reason = f"{moderator}: Warn 3 — {reason}"
+    until = discord.utils.utcnow() + WARN_3_MUTE_DURATION
+    try:
+        await member.timeout(until, reason=mute_reason)
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print(f"Warn 3 chat mute failed for {member.id}: {exc}")
+
+    if member.voice and member.voice.channel:
+        try:
+            await member.edit(mute=True, reason=mute_reason)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"Warn 3 voice mute failed for {member.id}: {exc}")
+
+
+async def _apply_warn_consequences(
+    member: discord.Member,
+    count: int,
+    moderator: discord.Member,
+    reason: str,
+) -> None:
+    sync_reason = f"Warn {count} by {moderator}: {reason}"
+    try:
+        if count == 1:
+            await _safe_add_roles(member, [WARN_1_ROLE_ID], reason=sync_reason)
+        elif count == 2:
+            await _safe_add_roles(member, [WARN_2_ROLE_ID], reason=sync_reason)
+        elif count >= 3:
+            await _safe_remove_roles(member, WARN_EARLY_ROLE_IDS, reason=sync_reason)
+            await _apply_warn_3_mutes(member, moderator, reason)
+            await _safe_add_roles(member, WARN_3_ROLE_IDS, reason=sync_reason)
+    except discord.Forbidden:
+        print(f"Warn {count} role action failed for {member.id}: missing Manage Roles or hierarchy issue")
+    except discord.HTTPException as exc:
+        print(f"Warn {count} role action failed for {member.id}: {exc.text}")
+
+
 class KickUserSelect(discord.ui.Select):
     def __init__(self, channel):
         self.channel = channel
@@ -3017,11 +3080,12 @@ async def voicemute_cmd(ctx, member: discord.Member, duration: str, *, reason: s
 @bot.command(name="warn", aliases=["warning"])
 @_punishment_staff_check()
 async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason provided"):
-    """Warn a member. After 3 warnings → automatic ban. Example: !warn @user toxic behavior"""
+    """Warn a member. Example: !warn @user toxic behavior"""
     if not _can_punish_target(ctx.author, member):
         return await ctx.send("You cannot punish this member.", delete_after=8)
 
     count = _add_warning(member.id)
+    await _apply_warn_consequences(member, count, ctx.author, reason)
     await _post_punishment_card(
         ctx,
         "warn",
@@ -3029,28 +3093,6 @@ async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason prov
         reason,
         extra_note=f"**({count}/{MAX_WARNS_BEFORE_BAN})**",
     )
-
-    if count >= MAX_WARNS_BEFORE_BAN:
-        ban_reason = f"Automatic ban — {MAX_WARNS_BEFORE_BAN} warnings reached. Last: {reason}"
-        try:
-            await member.ban(reason=f"{ctx.author}: {ban_reason}", delete_message_seconds=0)
-        except discord.Forbidden:
-            log_channel = await _get_punishment_log_channel(ctx.guild)
-            if log_channel:
-                await log_channel.send(
-                    f"⚠️ {member.mention} reached **{MAX_WARNS_BEFORE_BAN} warnings** "
-                    f"but I cannot ban them (missing **Ban Members** permission)."
-                )
-        except discord.HTTPException as exc:
-            log_channel = await _get_punishment_log_channel(ctx.guild)
-            if log_channel:
-                await log_channel.send(f"Auto-ban failed for {member.mention}: {exc.text}")
-        except Exception as exc:
-            await ctx.send(f"Auto-ban failed: {exc}", delete_after=12)
-            print(f"Auto-ban unexpected error: {exc}")
-        else:
-            await _post_punishment_card(ctx, "ban", member, ban_reason)
-            _clear_warnings(member.id)
 
 
 @bot.command(name="warnings", aliases=["warns", "getwarns"])
