@@ -27,12 +27,6 @@ if not TOKEN:
 
 CREATE_CHANNEL_ID = 1517870390968582155
 
-# Category where join-to-create temp voice rooms are created
-TEMP_VOICE_CATEGORY_ID = 1523436013337448638
-_env_temp_cat = os.getenv("TEMP_VOICE_CATEGORY_ID", "").strip()
-if _env_temp_cat and _env_temp_cat not in ("0", "none", "false"):
-    TEMP_VOICE_CATEGORY_ID = int(_env_temp_cat)
-
 SUPPORT_CHANNEL_ID = 1518020513174130769
 
 VERIFICATION_1_ID = 1517597478378143937
@@ -64,7 +58,11 @@ STAFF_ROLE_IDS = [
 ]
 
 TICKET_PANEL_CHANNEL_ID = 1522527871887998987
-TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "0")) or None
+TICKET_LOG_CHANNEL_ID = 1522527871887998987
+TICKET_CATEGORY_ID = 1523436013337448638
+_env_ticket_cat = os.getenv("TICKET_CATEGORY_ID", "").strip()
+if _env_ticket_cat and _env_ticket_cat not in ("0", "none", "false"):
+    TICKET_CATEGORY_ID = int(_env_ticket_cat)
 
 TICKET_CATEGORIES = {
     "support": {
@@ -97,7 +95,7 @@ DATA_BACKUP_CHANNEL_ID = 1518023858765168771
 BOT_VOICE_CHANNEL_ID = 1518025649225470072
 BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"))
 BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "welcome to Bot-Chat")
-BOT_BUILD_ID = "2026-07-05-tempvoice-v4"
+BOT_BUILD_ID = "2026-07-05-tickets-only-cat"
 
 # Server default: chat/voice-text notifications only on @mentions (not every message)
 SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS = os.getenv(
@@ -210,7 +208,6 @@ bot_chat_messages = {}
 ticket_counters: dict[int, int] = {}
 open_tickets_by_user: dict[int, int] = {}
 ticket_channels: dict[int, dict] = {}
-_temp_voice_category_cache: dict[int, discord.CategoryChannel] = {}
 WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
 user_warnings: dict[int, int] = {}
 MAX_WARNS_BEFORE_BAN = 3
@@ -247,117 +244,10 @@ JOIN_TO_CREATE_CHANNELS = {
 }
 
 
-def _get_temp_voice_category(guild: discord.Guild, trigger_channel: discord.VoiceChannel):
-    """Sync lookup — prefer _resolve_temp_voice_category when creating rooms."""
-    cached = _temp_voice_category_cache.get(guild.id)
-    if cached:
-        return cached
-    if TEMP_VOICE_CATEGORY_ID:
-        category = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
-        if category:
-            return category
-    return trigger_channel.category
-
-
 def _list_guild_category_ids(guild: discord.Guild) -> str:
     if not guild.categories:
         return "(no categories visible to bot)"
     return ", ".join(f"{cat.name}={cat.id}" for cat in guild.categories)
-
-
-async def _resolve_temp_voice_category(
-    guild: discord.Guild,
-    trigger_channel: discord.VoiceChannel,
-) -> discord.CategoryChannel | None:
-    """Resolve a real CategoryChannel for temp voice rooms (never force invalid IDs)."""
-    fallback = trigger_channel.category
-    if not TEMP_VOICE_CATEGORY_ID:
-        return fallback
-
-    cached = _temp_voice_category_cache.get(guild.id)
-    if cached and cached.id == TEMP_VOICE_CATEGORY_ID:
-        return cached
-
-    target_id = TEMP_VOICE_CATEGORY_ID
-
-    category = discord.utils.get(guild.categories, id=target_id)
-    if category:
-        _temp_voice_category_cache[guild.id] = category
-        print(f"TEMP_VOICE: category **{category.name}** ({category.id})")
-        return category
-
-    channel = guild.get_channel(target_id)
-    if isinstance(channel, discord.CategoryChannel):
-        _temp_voice_category_cache[guild.id] = channel
-        print(f"TEMP_VOICE: category **{channel.name}** ({channel.id})")
-        return channel
-
-    if isinstance(channel, discord.abc.GuildChannel) and channel.category:
-        _temp_voice_category_cache[guild.id] = channel.category
-        print(
-            f"TEMP_VOICE: ID {target_id} is #{channel.name} "
-            f"→ parent **{channel.category.name}** ({channel.category.id})"
-        )
-        return channel.category
-
-    try:
-        fetched = await bot.fetch_channel(target_id)
-        if isinstance(fetched, discord.CategoryChannel) and fetched.guild.id == guild.id:
-            _temp_voice_category_cache[guild.id] = fetched
-            print(f"TEMP_VOICE: fetched category **{fetched.name}** ({fetched.id})")
-            return fetched
-        if isinstance(fetched, discord.abc.GuildChannel) and fetched.guild.id == guild.id and fetched.category:
-            _temp_voice_category_cache[guild.id] = fetched.category
-            print(
-                f"TEMP_VOICE: fetched channel #{fetched.name} "
-                f"→ parent **{fetched.category.name}** ({fetched.category.id})"
-            )
-            return fetched.category
-        print(
-            f"TEMP_VOICE ERROR: ID {target_id} is {type(fetched).__name__}, not a category in this server."
-        )
-    except discord.HTTPException as exc:
-        print(f"TEMP_VOICE ERROR: ID {target_id} invalid or inaccessible — {exc}")
-
-    print(
-        f"TEMP_VOICE ERROR: cannot use {target_id}. "
-        f"Visible categories: {_list_guild_category_ids(guild)}"
-    )
-    if fallback:
-        print(
-            f"TEMP_VOICE: using trigger hub category **{fallback.name}** ({fallback.id}) instead."
-        )
-    return fallback
-
-
-async def _log_temp_voice_setup(guild: discord.Guild):
-    if not TEMP_VOICE_CATEGORY_ID:
-        print("TEMP_VOICE: no category configured.")
-        return
-
-    hub = guild.get_channel(CREATE_CHANNEL_ID)
-    if not isinstance(hub, discord.VoiceChannel):
-        category = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
-        if category:
-            _temp_voice_category_cache[guild.id] = category
-            print(f"TEMP_VOICE ready: **{category.name}** ({category.id})")
-            return
-        print(
-            f"TEMP_VOICE MISCONFIGURED: {TEMP_VOICE_CATEGORY_ID} is not a valid category.\n"
-            f"  Categories visible to bot: {_list_guild_category_ids(guild)}\n"
-            f"  Fix: right-click the category → Copy ID → update TEMP_VOICE_CATEGORY_ID in bot.py"
-        )
-        return
-
-    category = await _resolve_temp_voice_category(guild, hub)
-    if category and category.id == TEMP_VOICE_CATEGORY_ID:
-        print(f"TEMP_VOICE ready: salons will be created in **{category.name}** ({category.id})")
-    else:
-        print(
-            f"TEMP_VOICE MISCONFIGURED: {TEMP_VOICE_CATEGORY_ID} is not a valid category.\n"
-            f"  Categories visible to bot: {_list_guild_category_ids(guild)}\n"
-            f"  Fix: right-click the category → Copy ID → update TEMP_VOICE_CATEGORY_ID in bot.py"
-        )
 
 
 async def _create_join_to_create_room(member, trigger_channel):
@@ -367,7 +257,7 @@ async def _create_join_to_create_room(member, trigger_channel):
         return
 
     guild = member.guild
-    target_category = await _resolve_temp_voice_category(guild, trigger_channel)
+    category = trigger_channel.category
     everyone_role = guild.default_role
     staff_role = guild.get_role(STAFF_ROLE_ID)
     boy_role = guild.get_role(BOY_ROLE_ID)
@@ -418,53 +308,14 @@ async def _create_join_to_create_room(member, trigger_channel):
     else:
         channel_name = config["name"].format(member=member.name)
 
-    fallback_category = trigger_channel.category
-    create_reason = f"Temp {config['kind']} room for {member}"
-    new_channel = None
-    last_exc = None
-
-    for attempt_category in (target_category, fallback_category, None):
-        if attempt_category is fallback_category and attempt_category == target_category:
-            continue
-        try:
-            new_channel = await guild.create_voice_channel(
-                name=channel_name[:100],
-                category=attempt_category,
-                overwrites=overwrites,
-                reason=create_reason,
-            )
-            if attempt_category is not target_category and target_category:
-                label = getattr(attempt_category, "name", "no category")
-                print(f"TEMP_VOICE: created in fallback category ({label})")
-            break
-        except discord.HTTPException as exc:
-            last_exc = exc
-            if exc.code == 10003:
-                label = getattr(attempt_category, "id", "none")
-                print(f"TEMP_VOICE: create failed (Unknown Channel) for category {label}")
-                continue
-            raise
-
-    if new_channel is None:
-        print(f"TEMP_VOICE: could not create room for {member}: {last_exc}")
-        return
-
-    if (
-        target_category
-        and new_channel.category_id != target_category.id
-        and target_category.id == TEMP_VOICE_CATEGORY_ID
-    ):
-        try:
-            await new_channel.edit(category=target_category, reason="Move temp room to configured category")
-            new_channel = guild.get_channel(new_channel.id) or new_channel
-        except discord.HTTPException as exc:
-            print(f"TEMP_VOICE: could not move room to {target_category.id}: {exc}")
-
-    cat_name = getattr(new_channel.category, "name", "none")
-    print(
-        f"Temp room created: {new_channel.name} → "
-        f"category **{cat_name}** (id={new_channel.category_id})"
+    new_channel = await guild.create_voice_channel(
+        name=channel_name[:100],
+        category=category,
+        overwrites=overwrites,
+        reason=f"Temp {config['kind']} room for {member}",
     )
+    cat_name = getattr(category, "name", "none") if category else "none"
+    print(f"Temp room created: {new_channel.name} → category {cat_name}")
     owners[new_channel.id] = member.id
     room_kinds[new_channel.id] = config["kind"]
     await member.move_to(new_channel)
@@ -793,6 +644,58 @@ def _sanitize_ticket_slug(name: str, *, max_len: int = 18) -> str:
     return (cleaned[:max_len] or "user")
 
 
+def _resolve_ticket_category(guild: discord.Guild) -> discord.CategoryChannel | None:
+    """Resolve ticket category — same pattern as the reference ticket bot."""
+    category_id = TICKET_CATEGORY_ID
+    category = guild.get_channel(category_id)
+    if isinstance(category, discord.CategoryChannel):
+        return category
+    category = discord.utils.get(guild.categories, id=category_id)
+    if category:
+        return category
+    return None
+
+
+def _ticket_channel_name(member: discord.Member, category_key: str) -> str:
+    slug = _sanitize_ticket_slug(member.name, max_len=24)
+    return f"ticket-{category_key}-{slug}"[:100]
+
+
+def _find_open_ticket_channel(
+    guild: discord.Guild,
+    member: discord.Member,
+    category: discord.CategoryChannel,
+    *,
+    category_key: str,
+) -> discord.TextChannel | None:
+    if member.id in open_tickets_by_user:
+        existing = guild.get_channel(open_tickets_by_user[member.id])
+        if isinstance(existing, discord.TextChannel):
+            return existing
+
+    channel_name = _ticket_channel_name(member, category_key)
+    return discord.utils.get(guild.text_channels, name=channel_name, category=category)
+
+
+def _is_ticket_text_channel(channel: discord.abc.GuildChannel) -> bool:
+    if not isinstance(channel, discord.TextChannel):
+        return False
+    if channel.id in ticket_channels:
+        return True
+    if _parse_ticket_topic(channel.topic):
+        return True
+    if TICKET_CATEGORY_ID and channel.category_id == TICKET_CATEGORY_ID:
+        return channel.name.startswith("ticket-")
+    return False
+
+
+def _is_ticket_staff(member: discord.Member) -> bool:
+    if member.guild_permissions.manage_guild:
+        return True
+    staff_role = member.guild.get_role(STAFF_ROLE_ID)
+    return bool(staff_role and staff_role in member.roles)
+
+
 def _get_ticket_panel_channel(guild: discord.Guild):
     if TICKET_PANEL_CHANNEL_ID:
         channel = guild.get_channel(TICKET_PANEL_CHANNEL_ID)
@@ -801,12 +704,32 @@ def _get_ticket_panel_channel(guild: discord.Guild):
     return None
 
 
-def _get_ticket_category(guild: discord.Guild, panel_channel: discord.TextChannel | None):
-    if TICKET_CATEGORY_ID:
-        return guild.get_channel(TICKET_CATEGORY_ID)
-    if panel_channel and panel_channel.category:
-        return panel_channel.category
-    return None
+async def _log_ticket_message_to_staff(message: discord.Message):
+    """Notify staff log channel when a user writes in a ticket (reference bot behavior)."""
+    if not isinstance(message.channel, discord.TextChannel) or not message.guild:
+        return
+    if message.channel.category_id != TICKET_CATEGORY_ID:
+        return
+    if _is_ticket_staff(message.author):
+        return
+
+    history = [msg async for msg in message.channel.history(limit=20)]
+    user_messages = [msg for msg in history if msg.author == message.author]
+    if len(user_messages) == 1:
+        await message.channel.send("Oki la74a taw ijik chkon ya7ki ma3ak")
+
+    log_channel = message.guild.get_channel(TICKET_LOG_CHANNEL_ID)
+    if not log_channel:
+        return
+
+    preview = message.content[:500] if message.content else "(attachment/embed)"
+    try:
+        await log_channel.send(
+            f"🔔 <@&{STAFF_ROLE_ID}> **[Ticket - {message.author.name}]** "
+            f"fil chat `{message.channel.name}`:\n> {preview}"
+        )
+    except discord.HTTPException as exc:
+        print(f"Ticket staff log failed: {exc}")
 
 
 def _get_staff_ticket_roles(guild: discord.Guild):
@@ -905,26 +828,40 @@ async def _create_text_ticket(interaction: discord.Interaction, category_key: st
     await interaction.response.defer(ephemeral=True)
 
     guild = interaction.guild
-    panel_channel = _get_ticket_panel_channel(guild)
-    category = _get_ticket_category(guild, panel_channel)
+    category = _resolve_ticket_category(guild)
+    if not category:
+        return await interaction.followup.send(
+            "❌ Ticket category not found. Check `TICKET_CATEGORY_ID` in bot.py.",
+            ephemeral=True,
+        )
+
+    existing_channel = _find_open_ticket_channel(guild, member, category, category_key=category_key)
+    if existing_channel:
+        return await interaction.followup.send(
+            f"⚠️ 3andek ticket ma7loul men 9bal hna: {existing_channel.mention}",
+            ephemeral=True,
+        )
+
     ticket_number = _next_ticket_number(guild.id)
     category_meta = TICKET_CATEGORIES[category_key]
-    slug = _sanitize_ticket_slug(member.name)
-    channel_name = f"ticket-{category_key}-{slug}-{ticket_number:04d}"
+    channel_name = _ticket_channel_name(member, category_key)
 
+    staff_role = guild.get_role(STAFF_ROLE_ID)
     overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.default_role: discord.PermissionOverwrite(view_channel=False, read_messages=False),
         member: discord.PermissionOverwrite(
             view_channel=True,
+            read_messages=True,
             send_messages=True,
             read_message_history=True,
             attach_files=True,
             embed_links=True,
         ),
     }
-    for role in _get_staff_ticket_roles(guild):
-        overwrites[role] = discord.PermissionOverwrite(
+    if staff_role:
+        overwrites[staff_role] = discord.PermissionOverwrite(
             view_channel=True,
+            read_messages=True,
             send_messages=True,
             read_message_history=True,
             attach_files=True,
@@ -942,7 +879,7 @@ async def _create_text_ticket(interaction: discord.Interaction, category_key: st
 
     try:
         ticket_channel = await guild.create_text_channel(
-            name=channel_name[:100],
+            name=channel_name,
             category=category,
             overwrites=overwrites,
             topic=_ticket_topic(member.id, category_key),
@@ -950,7 +887,7 @@ async def _create_text_ticket(interaction: discord.Interaction, category_key: st
         )
     except discord.Forbidden:
         return await interaction.followup.send(
-            "I cannot create ticket channels. Check my **Manage Channels** permission.",
+            "❌ El Bot ma 3andouch permission `Manage Channels`!",
             ephemeral=True,
         )
     except discord.HTTPException as exc:
@@ -974,6 +911,16 @@ async def _create_text_ticket(interaction: discord.Interaction, category_key: st
         view=close_view,
     )
 
+    log_channel = guild.get_channel(TICKET_LOG_CHANNEL_ID)
+    if log_channel:
+        try:
+            await log_channel.send(
+                f"🔔 <@&{STAFF_ROLE_ID}> **Ticket jdid** — {member.mention} "
+                f"({category_meta['label']}) → {ticket_channel.mention}"
+            )
+        except discord.HTTPException as exc:
+            print(f"Ticket open log failed: {exc}")
+
     alert = discord.Embed(
         title=f"NEW {category_meta['label'].upper()} TICKET",
         description=(
@@ -986,7 +933,7 @@ async def _create_text_ticket(interaction: discord.Interaction, category_key: st
     await _notify_roles_members(guild, STAFF_ROLE_IDS, alert)
 
     await interaction.followup.send(
-        f"Your ticket was created: {ticket_channel.mention}",
+        f"✅ T7al ticket jdid hna: {ticket_channel.mention}",
         ephemeral=True,
     )
 
@@ -1041,6 +988,17 @@ async def _close_text_ticket(
     await interaction.followup.send("Ticket closed.", ephemeral=True)
 
 
+async def _log_ticket_setup(guild: discord.Guild):
+    category = _resolve_ticket_category(guild)
+    if category:
+        print(f"TICKETS ready: category **{category.name}** ({category.id})")
+    else:
+        print(
+            f"TICKETS MISCONFIGURED: category {TICKET_CATEGORY_ID} not found. "
+            f"Visible categories: {_list_guild_category_ids(guild)}"
+        )
+
+
 async def _ensure_ticket_panel(guild: discord.Guild):
     channel = _get_ticket_panel_channel(guild)
     if not channel:
@@ -1052,12 +1010,22 @@ async def _ensure_ticket_panel(guild: discord.Guild):
                 continue
             if not message.embeds:
                 continue
-            if message.embeds[0].title == TICKET_PANEL_TITLE:
+            title = message.embeds[0].title or ""
+            if title in (TICKET_PANEL_TITLE, "🎟️ Support Ticket"):
                 return
     except discord.Forbidden:
         return
 
-    await channel.send(embed=_build_ticket_panel_embed(), view=TicketPanelView())
+    embed = discord.Embed(
+        title="🎟️ Support Ticket",
+        description=(
+            "Choose a category below to open a private ticket.\n"
+            "Staff will respond as soon as possible."
+        ),
+        color=discord.Color.from_rgb(43, 45, 49),
+    )
+    embed.set_image(url="https://i.imgur.com/07cNK6S.png")
+    await channel.send(embed=embed, view=TicketPanelView())
 
 
 async def _register_existing_ticket_channels(guild: discord.Guild):
@@ -1876,7 +1844,7 @@ async def on_ready():
                 print(f"{guild.name}: {message}")
             await _refresh_bot_chat_welcome_message(guild)
             await _ensure_ticket_panel(guild)
-            await _log_temp_voice_setup(guild)
+            await _log_ticket_setup(guild)
         except Exception as e:
             print(f"Guild init failed for {guild.name}: {e}")
 
@@ -2011,50 +1979,31 @@ async def ping_cmd(ctx):
     )
 
 
-@bot.command(name="checktempcategory")
+@bot.command(name="checkticketcategory")
 @commands.has_permissions(manage_guild=True)
-async def check_temp_category_cmd(ctx):
-    """Show where temp voice rooms will be created (admin)."""
+async def check_ticket_category_cmd(ctx):
+    """Show ticket category configuration (admin)."""
     guild = ctx.guild
-    lines = [f"**Build:** `{BOT_BUILD_ID}`", f"**Configured ID:** `{TEMP_VOICE_CATEGORY_ID}`"]
+    lines = [f"**Build:** `{BOT_BUILD_ID}`", f"**Ticket category ID:** `{TICKET_CATEGORY_ID}`"]
 
-    category = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
+    category = _resolve_ticket_category(guild)
     if category:
-        lines.append(f"**Status:** OK — category **{category.name}**")
+        lines.append(f"**Status:** OK — **{category.name}** (`{category.id}`)")
     else:
-        channel = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(TEMP_VOICE_CATEGORY_ID)
-            except discord.HTTPException as exc:
-                lines.append(f"**Status:** INVALID — `{exc}`")
-                channel = None
-
-        if isinstance(channel, discord.CategoryChannel):
-            lines.append(f"**Status:** OK — category **{channel.name}**")
-        elif channel is not None:
-            lines.append(f"**Type:** {type(channel).__name__} — **{channel.name}**")
-            if channel.category:
-                lines.append(f"**Parent category:** {channel.category.name} (`{channel.category.id}`)")
-        elif channel is None:
-            lines.append("**Status:** ID not found on this server.")
-
-    lines.append(f"**Visible categories:** {_list_guild_category_ids(guild)}")
+        lines.append("**Status:** INVALID — category not found.")
+        lines.append(f"**Visible categories:** {_list_guild_category_ids(guild)}")
 
     hub = guild.get_channel(CREATE_CHANNEL_ID)
-    if isinstance(hub, discord.VoiceChannel):
-        resolved = await _resolve_temp_voice_category(guild, hub)
-        if resolved:
-            lines.append(f"**Rooms will be created in:** {resolved.name} (`{resolved.id}`)")
-        else:
-            lines.append("**Rooms will be created in:** no category (guild root)")
-    else:
-        lines.append("**Rooms will be created in:** (Create hub not found)")
+    if isinstance(hub, discord.VoiceChannel) and hub.category:
+        lines.append(
+            f"**Voice rooms (join-to-create):** same category as hub → "
+            f"**{hub.category.name}** (`{hub.category.id}`)"
+        )
 
     embed = discord.Embed(
-        title="Temp Voice Category Check",
+        title="Ticket Category Check",
         description="\n".join(lines),
-        color=discord.Color.red() if not discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID) else discord.Color.green(),
+        color=discord.Color.green() if category else discord.Color.red(),
     )
     await ctx.send(embed=embed, delete_after=45)
     try:
@@ -2256,17 +2205,26 @@ async def post_roles_cmd(ctx):
         pass
 
 
-@bot.command(name="ticketpanel")
+@bot.command(name="ticketpanel", aliases=["go"])
 @commands.has_permissions(manage_guild=True)
 async def ticket_panel_cmd(ctx):
-    """Post the text ticket panel (admin only)."""
+    """Post the text ticket panel (admin only). Alias: !go"""
     target = ctx.channel
     if TICKET_PANEL_CHANNEL_ID:
         panel_channel = ctx.guild.get_channel(TICKET_PANEL_CHANNEL_ID)
         if panel_channel:
             target = panel_channel
 
-    await target.send(embed=_build_ticket_panel_embed(), view=TicketPanelView())
+    embed = discord.Embed(
+        title="🎟️ Support Ticket",
+        description=(
+            "Choose a category below to open a private ticket.\n"
+            "Staff will respond as soon as possible."
+        ),
+        color=discord.Color.from_rgb(43, 45, 49),
+    )
+    embed.set_image(url="https://i.imgur.com/07cNK6S.png")
+    await target.send(embed=embed, view=TicketPanelView())
     if target.id != ctx.channel.id:
         await ctx.send(f"Ticket panel posted in {target.mention}.", delete_after=8)
     try:
@@ -2275,29 +2233,29 @@ async def ticket_panel_cmd(ctx):
         pass
 
 
-@bot.command(name="closeticket")
+@bot.command(name="closeticket", aliases=["cv"])
 async def close_ticket_cmd(ctx, *, reason: str = "Closed by staff"):
-    """Close the current ticket channel."""
+    """Close the current ticket channel. Staff alias: !cv"""
     if not isinstance(ctx.channel, discord.TextChannel):
         return await ctx.send("Run this command inside a ticket channel.", delete_after=8)
 
-    info = ticket_channels.get(ctx.channel.id) or _parse_ticket_topic(ctx.channel.topic)
-    if not info:
-        return await ctx.send("This channel is not a ticket.", delete_after=8)
+    if ctx.channel.category_id != TICKET_CATEGORY_ID and not _is_ticket_text_channel(ctx.channel):
+        return await ctx.send("El command ha4i testa3malha ken de5el ticket chat!", delete_after=8)
 
-    owner_id = info.get("user_id") or info.get("uid")
-    if not _can_manage_ticket(ctx.author, owner_id):
+    info = ticket_channels.get(ctx.channel.id) or _parse_ticket_topic(ctx.channel.topic)
+    owner_id = None
+    if info:
+        owner_id = info.get("user_id") or info.get("uid")
+
+    if owner_id is not None and not _can_manage_ticket(ctx.author, owner_id):
         return await ctx.send("Only the ticket owner or staff can close this ticket.", delete_after=8)
+    if owner_id is None and not _is_ticket_staff(ctx.author) and ctx.author.id != ctx.guild.owner_id:
+        return await ctx.send("❌ El command ha4i yesta3mlha ken el Staff!", delete_after=8)
 
     _unregister_ticket_channel(ctx.channel.id)
     try:
-        await ctx.send(
-            embed=discord.Embed(
-                title="Ticket Closed",
-                description=f"Closed by {ctx.author.mention}\n**Reason:** {reason}",
-                color=discord.Color.red(),
-            )
-        )
+        await ctx.send("Jari fsa5 el ticket... ⚙️", delete_after=3)
+        await asyncio.sleep(1)
         await ctx.channel.delete(reason=f"Ticket closed by {ctx.author}: {reason}")
     except discord.Forbidden:
         await ctx.send("I cannot delete this ticket channel.", delete_after=8)
@@ -2736,6 +2694,19 @@ async def test_punishment_cmd(
         return await ctx.send(f"Unknown type. Use one of: `{types_list}`", delete_after=10)
 
     await _post_punishment_card(ctx, punishment_type, target, reason, preview=True)
+
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    try:
+        await _log_ticket_message_to_staff(message)
+    except Exception as exc:
+        print(f"Ticket message handler failed: {exc}")
+
+    await bot.process_commands(message)
 
 
 @bot.event
