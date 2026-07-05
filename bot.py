@@ -1840,7 +1840,7 @@ async def _apply_warn_consequences(
             await _safe_add_roles(member, [WARN_1_ROLE_ID], reason=sync_reason)
         elif count == 2:
             await _safe_add_roles(member, [WARN_2_ROLE_ID], reason=sync_reason)
-        elif count >= 3:
+        elif count == 3:
             await _safe_remove_roles(member, WARN_EARLY_ROLE_IDS, reason=sync_reason)
             await _apply_warn_3_mutes(member, moderator, reason)
             await _safe_add_roles(member, [VOICE_MUTE_ROLE_ID], reason=sync_reason)
@@ -3246,12 +3246,18 @@ async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason prov
 
     count = _add_warning(member.id)
     await _apply_warn_consequences(member, count, ctx.author, reason)
+
+    card_note = f"**({count}/{MAX_WARNS_BEFORE_BAN})**"
+    if count >= MAX_WARNS_BEFORE_BAN:
+        _clear_warnings(member.id)
+        card_note = f"**({MAX_WARNS_BEFORE_BAN}/{MAX_WARNS_BEFORE_BAN})**"
+
     await _post_punishment_card(
         ctx,
         "warn",
         member,
         reason,
-        extra_note=f"**({count}/{MAX_WARNS_BEFORE_BAN})**",
+        extra_note=card_note,
     )
 
 
