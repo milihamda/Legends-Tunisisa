@@ -97,7 +97,7 @@ DATA_BACKUP_CHANNEL_ID = 1518023858765168771
 BOT_VOICE_CHANNEL_ID = 1518025649225470072
 BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"))
 BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "welcome to Bot-Chat")
-BOT_BUILD_ID = "2026-07-05-tempvoice-v3"
+BOT_BUILD_ID = "2026-07-05-tempvoice-v4"
 
 # Server default: chat/voice-text notifications only on @mentions (not every message)
 SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS = os.getenv(
@@ -210,6 +210,7 @@ bot_chat_messages = {}
 ticket_counters: dict[int, int] = {}
 open_tickets_by_user: dict[int, int] = {}
 ticket_channels: dict[int, dict] = {}
+_temp_voice_category_cache: dict[int, discord.CategoryChannel] = {}
 WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
 user_warnings: dict[int, int] = {}
 MAX_WARNS_BEFORE_BAN = 3
@@ -248,87 +249,115 @@ JOIN_TO_CREATE_CHANNELS = {
 
 def _get_temp_voice_category(guild: discord.Guild, trigger_channel: discord.VoiceChannel):
     """Sync lookup — prefer _resolve_temp_voice_category when creating rooms."""
-    if not TEMP_VOICE_CATEGORY_ID:
-        return trigger_channel.category
-    category = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
-    if category:
-        return category
-    channel = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
-    if isinstance(channel, discord.CategoryChannel):
-        return channel
-    if isinstance(channel, discord.abc.GuildChannel) and channel.category:
-        return channel.category
+    cached = _temp_voice_category_cache.get(guild.id)
+    if cached:
+        return cached
+    if TEMP_VOICE_CATEGORY_ID:
+        category = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
+        if category:
+            return category
     return trigger_channel.category
+
+
+def _list_guild_category_ids(guild: discord.Guild) -> str:
+    if not guild.categories:
+        return "(no categories visible to bot)"
+    return ", ".join(f"{cat.name}={cat.id}" for cat in guild.categories)
 
 
 async def _resolve_temp_voice_category(
     guild: discord.Guild,
     trigger_channel: discord.VoiceChannel,
-):
-    """Return the category (or Object id) where temp voice rooms must be created."""
+) -> discord.CategoryChannel | None:
+    """Resolve a real CategoryChannel for temp voice rooms (never force invalid IDs)."""
+    fallback = trigger_channel.category
     if not TEMP_VOICE_CATEGORY_ID:
-        return trigger_channel.category
+        return fallback
 
-    channel = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
-    if channel is None:
-        channel = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
-    if channel is None:
-        try:
-            channel = await guild.fetch_channel(TEMP_VOICE_CATEGORY_ID)
-        except discord.HTTPException as exc:
-            print(
-                f"TEMP_VOICE: could not fetch {TEMP_VOICE_CATEGORY_ID} ({exc}) "
-                f"— forcing parent_id anyway."
-            )
-            return discord.Object(id=TEMP_VOICE_CATEGORY_ID)
+    cached = _temp_voice_category_cache.get(guild.id)
+    if cached and cached.id == TEMP_VOICE_CATEGORY_ID:
+        return cached
 
+    target_id = TEMP_VOICE_CATEGORY_ID
+
+    category = discord.utils.get(guild.categories, id=target_id)
+    if category:
+        _temp_voice_category_cache[guild.id] = category
+        print(f"TEMP_VOICE: category **{category.name}** ({category.id})")
+        return category
+
+    channel = guild.get_channel(target_id)
     if isinstance(channel, discord.CategoryChannel):
-        print(f"TEMP_VOICE: using category **{channel.name}** ({channel.id})")
+        _temp_voice_category_cache[guild.id] = channel
+        print(f"TEMP_VOICE: category **{channel.name}** ({channel.id})")
         return channel
 
     if isinstance(channel, discord.abc.GuildChannel) and channel.category:
+        _temp_voice_category_cache[guild.id] = channel.category
         print(
-            f"TEMP_VOICE: ID {TEMP_VOICE_CATEGORY_ID} is channel #{channel.name} "
-            f"— using parent category **{channel.category.name}** ({channel.category.id})."
+            f"TEMP_VOICE: ID {target_id} is #{channel.name} "
+            f"→ parent **{channel.category.name}** ({channel.category.id})"
         )
         return channel.category
 
-    print(
-        f"TEMP_VOICE: ID {TEMP_VOICE_CATEGORY_ID} resolved as {type(channel).__name__} "
-        f"— forcing parent_id."
-    )
-    return discord.Object(id=TEMP_VOICE_CATEGORY_ID)
-
-
-async def _ensure_temp_voice_parent(
-    voice_channel: discord.VoiceChannel,
-    *,
-    reason: str,
-) -> discord.VoiceChannel:
-    """Move a temp room into TEMP_VOICE_CATEGORY_ID if Discord created it elsewhere."""
-    if not TEMP_VOICE_CATEGORY_ID:
-        return voice_channel
-    if voice_channel.category_id == TEMP_VOICE_CATEGORY_ID:
-        return voice_channel
-
-    print(
-        f"TEMP_VOICE: room {voice_channel.name} is in category "
-        f"{voice_channel.category_id} — moving to {TEMP_VOICE_CATEGORY_ID}."
-    )
     try:
-        await voice_channel.edit(
-            category=discord.Object(id=TEMP_VOICE_CATEGORY_ID),
-            reason=reason,
-        )
-        refreshed = voice_channel.guild.get_channel(voice_channel.id) or voice_channel
+        fetched = await bot.fetch_channel(target_id)
+        if isinstance(fetched, discord.CategoryChannel) and fetched.guild.id == guild.id:
+            _temp_voice_category_cache[guild.id] = fetched
+            print(f"TEMP_VOICE: fetched category **{fetched.name}** ({fetched.id})")
+            return fetched
+        if isinstance(fetched, discord.abc.GuildChannel) and fetched.guild.id == guild.id and fetched.category:
+            _temp_voice_category_cache[guild.id] = fetched.category
+            print(
+                f"TEMP_VOICE: fetched channel #{fetched.name} "
+                f"→ parent **{fetched.category.name}** ({fetched.category.id})"
+            )
+            return fetched.category
         print(
-            f"TEMP_VOICE: moved {refreshed.name} → category "
-            f"{refreshed.category_id} ({getattr(refreshed.category, 'name', '?')})."
+            f"TEMP_VOICE ERROR: ID {target_id} is {type(fetched).__name__}, not a category in this server."
         )
-        return refreshed
     except discord.HTTPException as exc:
-        print(f"TEMP_VOICE: failed to move room to {TEMP_VOICE_CATEGORY_ID}: {exc}")
-        return voice_channel
+        print(f"TEMP_VOICE ERROR: ID {target_id} invalid or inaccessible — {exc}")
+
+    print(
+        f"TEMP_VOICE ERROR: cannot use {target_id}. "
+        f"Visible categories: {_list_guild_category_ids(guild)}"
+    )
+    if fallback:
+        print(
+            f"TEMP_VOICE: using trigger hub category **{fallback.name}** ({fallback.id}) instead."
+        )
+    return fallback
+
+
+async def _log_temp_voice_setup(guild: discord.Guild):
+    if not TEMP_VOICE_CATEGORY_ID:
+        print("TEMP_VOICE: no category configured.")
+        return
+
+    hub = guild.get_channel(CREATE_CHANNEL_ID)
+    if not isinstance(hub, discord.VoiceChannel):
+        category = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
+        if category:
+            _temp_voice_category_cache[guild.id] = category
+            print(f"TEMP_VOICE ready: **{category.name}** ({category.id})")
+            return
+        print(
+            f"TEMP_VOICE MISCONFIGURED: {TEMP_VOICE_CATEGORY_ID} is not a valid category.\n"
+            f"  Categories visible to bot: {_list_guild_category_ids(guild)}\n"
+            f"  Fix: right-click the category → Copy ID → update TEMP_VOICE_CATEGORY_ID in bot.py"
+        )
+        return
+
+    category = await _resolve_temp_voice_category(guild, hub)
+    if category and category.id == TEMP_VOICE_CATEGORY_ID:
+        print(f"TEMP_VOICE ready: salons will be created in **{category.name}** ({category.id})")
+    else:
+        print(
+            f"TEMP_VOICE MISCONFIGURED: {TEMP_VOICE_CATEGORY_ID} is not a valid category.\n"
+            f"  Categories visible to bot: {_list_guild_category_ids(guild)}\n"
+            f"  Fix: right-click the category → Copy ID → update TEMP_VOICE_CATEGORY_ID in bot.py"
+        )
 
 
 async def _create_join_to_create_room(member, trigger_channel):
@@ -338,7 +367,7 @@ async def _create_join_to_create_room(member, trigger_channel):
         return
 
     guild = member.guild
-    category = await _resolve_temp_voice_category(guild, trigger_channel)
+    target_category = await _resolve_temp_voice_category(guild, trigger_channel)
     everyone_role = guild.default_role
     staff_role = guild.get_role(STAFF_ROLE_ID)
     boy_role = guild.get_role(BOY_ROLE_ID)
@@ -388,26 +417,53 @@ async def _create_join_to_create_room(member, trigger_channel):
         channel_name = format_lounge_room_name(member.name)
     else:
         channel_name = config["name"].format(member=member.name)
-    new_channel = await guild.create_voice_channel(
-        name=channel_name[:100],
-        category=category,
-        overwrites=overwrites,
-        reason=f"Temp {config['kind']} room for {member}",
-    )
-    new_channel = await _ensure_temp_voice_parent(
-        new_channel,
-        reason=f"Move temp room to category {TEMP_VOICE_CATEGORY_ID}",
-    )
-    if isinstance(category, discord.CategoryChannel):
-        cat_label = f"{category.name} ({category.id})"
-    elif category:
-        cat_label = f"id={getattr(category, 'id', TEMP_VOICE_CATEGORY_ID)}"
-    else:
-        cat_label = "no category"
-    actual = new_channel.category_id or "none"
+
+    fallback_category = trigger_channel.category
+    create_reason = f"Temp {config['kind']} room for {member}"
+    new_channel = None
+    last_exc = None
+
+    for attempt_category in (target_category, fallback_category, None):
+        if attempt_category is fallback_category and attempt_category == target_category:
+            continue
+        try:
+            new_channel = await guild.create_voice_channel(
+                name=channel_name[:100],
+                category=attempt_category,
+                overwrites=overwrites,
+                reason=create_reason,
+            )
+            if attempt_category is not target_category and target_category:
+                label = getattr(attempt_category, "name", "no category")
+                print(f"TEMP_VOICE: created in fallback category ({label})")
+            break
+        except discord.HTTPException as exc:
+            last_exc = exc
+            if exc.code == 10003:
+                label = getattr(attempt_category, "id", "none")
+                print(f"TEMP_VOICE: create failed (Unknown Channel) for category {label}")
+                continue
+            raise
+
+    if new_channel is None:
+        print(f"TEMP_VOICE: could not create room for {member}: {last_exc}")
+        return
+
+    if (
+        target_category
+        and new_channel.category_id != target_category.id
+        and target_category.id == TEMP_VOICE_CATEGORY_ID
+    ):
+        try:
+            await new_channel.edit(category=target_category, reason="Move temp room to configured category")
+            new_channel = guild.get_channel(new_channel.id) or new_channel
+        except discord.HTTPException as exc:
+            print(f"TEMP_VOICE: could not move room to {target_category.id}: {exc}")
+
+    cat_name = getattr(new_channel.category, "name", "none")
     print(
         f"Temp room created: {new_channel.name} → "
-        f"target {cat_label}, actual category_id={actual}"
+        f"category **{cat_name}** (id={new_channel.category_id})"
     )
     owners[new_channel.id] = member.id
     room_kinds[new_channel.id] = config["kind"]
@@ -1820,6 +1876,7 @@ async def on_ready():
                 print(f"{guild.name}: {message}")
             await _refresh_bot_chat_welcome_message(guild)
             await _ensure_ticket_panel(guild)
+            await _log_temp_voice_setup(guild)
         except Exception as e:
             print(f"Guild init failed for {guild.name}: {e}")
 
@@ -1961,36 +2018,45 @@ async def check_temp_category_cmd(ctx):
     guild = ctx.guild
     lines = [f"**Build:** `{BOT_BUILD_ID}`", f"**Configured ID:** `{TEMP_VOICE_CATEGORY_ID}`"]
 
-    channel = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
-    if channel is None:
-        try:
-            channel = await guild.fetch_channel(TEMP_VOICE_CATEGORY_ID)
-            lines.append("**Lookup:** fetched from Discord API")
-        except discord.HTTPException as exc:
-            lines.append(f"**Lookup failed:** `{exc}`")
-            channel = None
-
-    if isinstance(channel, discord.CategoryChannel):
-        lines.append(f"**Type:** Category — **{channel.name}**")
-    elif channel is not None:
-        lines.append(f"**Type:** {type(channel).__name__} — **{getattr(channel, 'name', '?')}**")
-        if getattr(channel, "category", None):
-            lines.append(f"**Parent category:** {channel.category.name} (`{channel.category.id}`)")
+    category = discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID)
+    if category:
+        lines.append(f"**Status:** OK — category **{category.name}**")
     else:
-        lines.append("**Type:** not found — bot will still force `parent_id` on create.")
+        channel = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(TEMP_VOICE_CATEGORY_ID)
+            except discord.HTTPException as exc:
+                lines.append(f"**Status:** INVALID — `{exc}`")
+                channel = None
 
-    resolved = await _resolve_temp_voice_category(guild, ctx.channel)
-    if isinstance(resolved, discord.CategoryChannel):
-        lines.append(f"**Resolved target:** {resolved.name} (`{resolved.id}`)")
+        if isinstance(channel, discord.CategoryChannel):
+            lines.append(f"**Status:** OK — category **{channel.name}**")
+        elif channel is not None:
+            lines.append(f"**Type:** {type(channel).__name__} — **{channel.name}**")
+            if channel.category:
+                lines.append(f"**Parent category:** {channel.category.name} (`{channel.category.id}`)")
+        elif channel is None:
+            lines.append("**Status:** ID not found on this server.")
+
+    lines.append(f"**Visible categories:** {_list_guild_category_ids(guild)}")
+
+    hub = guild.get_channel(CREATE_CHANNEL_ID)
+    if isinstance(hub, discord.VoiceChannel):
+        resolved = await _resolve_temp_voice_category(guild, hub)
+        if resolved:
+            lines.append(f"**Rooms will be created in:** {resolved.name} (`{resolved.id}`)")
+        else:
+            lines.append("**Rooms will be created in:** no category (guild root)")
     else:
-        lines.append(f"**Resolved target:** forced parent_id `{getattr(resolved, 'id', '?')}`")
+        lines.append("**Rooms will be created in:** (Create hub not found)")
 
     embed = discord.Embed(
         title="Temp Voice Category Check",
         description="\n".join(lines),
-        color=discord.Color.blurple(),
+        color=discord.Color.red() if not discord.utils.get(guild.categories, id=TEMP_VOICE_CATEGORY_ID) else discord.Color.green(),
     )
-    await ctx.send(embed=embed, delete_after=30)
+    await ctx.send(embed=embed, delete_after=45)
     try:
         await ctx.message.delete()
     except discord.Forbidden:
