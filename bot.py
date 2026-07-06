@@ -3074,7 +3074,8 @@ async def _post_punishment_card(
         await ctx.send(f"Punishment card failed: {exc}", delete_after=12)
         return False
 
-    image_file = discord.File(buffer, filename="punishment.png")
+    card_bytes = buffer.getvalue()
+    image_file = discord.File(io.BytesIO(card_bytes), filename="punishment.png")
     label = PUNISHMENT_LABELS[punishment_type]
     content = f"New Punishment: **{label}** -> {target.mention}"
     if preview:
@@ -3103,6 +3104,30 @@ async def _post_punishment_card(
         print(f"Punishment post unexpected error in {log_channel.id}: {exc}")
         await ctx.send(f"Punishment post failed: {exc}", delete_after=12)
         return False
+
+    dm_recipient = ctx.author if preview else target
+    if dm_recipient and not dm_recipient.bot:
+        dm_lines = [
+            f"⚠️ **Punishment — {label}**",
+            f"**Server:** {ctx.guild.name}",
+            f"**Reason:** {reason}",
+        ]
+        if preview:
+            dm_lines.insert(0, "*(Preview — hedha ma howach punishment 7a9i9i)*")
+        if duration:
+            dm_lines.append(f"**Duration:** {_format_duration(duration)}")
+        if extra_note:
+            dm_lines.append(extra_note)
+        dm_file = discord.File(io.BytesIO(card_bytes), filename="punishment.png")
+        try:
+            await dm_recipient.send("\n".join(dm_lines), file=dm_file)
+        except discord.Forbidden:
+            who = "command author" if preview else f"target {target.id}"
+            print(f"Punishment DM blocked for {who} (DMs closed)")
+        except discord.HTTPException as exc:
+            print(f"Punishment DM failed for {dm_recipient.id}: {exc.text}")
+        except Exception as exc:
+            print(f"Punishment DM unexpected error for {dm_recipient.id}: {exc}")
 
     if finish_command:
         await _finish_staff_command(ctx, True, log_channel)
