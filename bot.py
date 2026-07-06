@@ -70,6 +70,7 @@ STAFF_ROLE_IDS = [
 
 GIVEAWAY_CHANNEL_ID = 1518721917312434197
 GIVEAWAY_ADMIN_ROLE_ID = 1511828976732209252
+BAN_TIMEOUT_IMMUNE_ROLE_IDS = [GIVEAWAY_ADMIN_ROLE_ID]
 
 TICKET_PANEL_CHANNEL_ID = 1522527871887998987
 TICKET_LOG_CHANNEL_ID = 1522527871887998987
@@ -2976,6 +2977,10 @@ def _can_punish_target(moderator: discord.Member, target: discord.Member) -> boo
     return True
 
 
+def _is_ban_timeout_immune(member: discord.Member) -> bool:
+    return _member_has_any_role(member, BAN_TIMEOUT_IMMUNE_ROLE_IDS)
+
+
 def _is_valid_punishment_log_channel(channel) -> bool:
     if channel is None:
         return False
@@ -3123,6 +3128,8 @@ async def ban_cmd(ctx, member: discord.Member, *, reason: str = "No reason provi
         return await ctx.send("You need **Ban Members** permission.", delete_after=8)
     if not _can_punish_target(ctx.author, member):
         return await ctx.send("You cannot punish this member.", delete_after=8)
+    if _is_ban_timeout_immune(member):
+        return await ctx.send("❌ Ma tnajemch tbani had el membre (role protégé).", delete_after=8)
 
     try:
         await member.ban(reason=f"{ctx.author}: {reason}", delete_message_seconds=0)
@@ -3143,6 +3150,8 @@ async def timeout_cmd(ctx, member: discord.Member, duration: str, *, reason: str
         return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
     if not _can_punish_target(ctx.author, member):
         return await ctx.send("You cannot punish this member.", delete_after=8)
+    if _is_ban_timeout_immune(member):
+        return await ctx.send("❌ Ma tnajemch ttimeouti had el membre (role protégé).", delete_after=8)
 
     delta = _parse_duration(duration)
     if not delta or delta > MAX_TIMEOUT:

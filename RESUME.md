@@ -6,63 +6,105 @@
 
 ---
 
-## Commandes texte (`!`)
+## Tout le monde
 
-| Commande | Aliases | Qui peut l'utiliser | Description |
-|----------|---------|---------------------|-------------|
-| `!level` | — | Tout le monde | Affiche le niveau vocal et le temps passé en vocal. Sans mention → tes stats. Avec `@user` → stats de cette personne. |
-| `!panel` | `!controlpanel`, `!roompanel` | Propriétaire de la room | Reposte le panneau de contrôle dans le chat vocal de ta room. Tu dois être connecté à ta room bot-managed. |
-| `!clear` | `!clearchat`, `!purgechat`, `!purge` | Owner de la room **ou** Manage Messages | Supprime tous les messages du chat (texte ou chat vocal). Après un clear dans une room, utilise `!panel` pour remettre les boutons. |
-| `!post` | `!say`, `!echo` | **Manage Messages** | Lit le texte que tu écris après la commande et le reposte au nom du bot. Supprime ton message de commande. Supporte les fichiers/images attachés. |
-| `!setnotifications` | `!mentionsonly`, `!notifmentions` | **Manage Server** (admin) | Met les notifications par défaut du serveur sur **@mentions only**. N'affecte que les **nouveaux** membres — chacun doit aussi régler ses notifs manuellement. |
-| `!postroles` | — | **Manage Server** (admin) | Poste le menu de sélection des rôles jeux. Les membres choisissent leurs jeux via un menu déroulant. |
-| `!testlevelup` | — | Admin / test | Prévisualise la carte de level-up. Exemple : `!testlevelup @user 2 3` |
-| `!testwelcome` | — | Admin / test | Envoie une carte de bienvenue test dans le channel welcome (sans qu'un membre rejoigne). |
+| Commande | Aliases | Description |
+|----------|---------|-------------|
+| `!ping` | — | Vérifie si le bot est en ligne. |
+| `!level` | — | Affiche le niveau vocal et le temps passé en vocal. Sans `@user` → tes stats. Avec `@user` → stats de cette personne. |
 
 ---
 
-## Détail de chaque commande
+## Rooms vocales (Join-to-Create)
 
-### `!level` [@membre]
-- Montre : **niveau actuel**, **temps vocal total (minutes)**, **minutes restantes** pour le prochain niveau.
-- Les bots n'ont pas de profil de level.
-- Le level monte automatiquement quand tu restes en vocal (voir section automatique).
+| Commande | Aliases | Qui peut l'utiliser | Description |
+|----------|---------|---------------------|-------------|
+| `!panel` | `!controlpanel`, `!roompanel` | Propriétaire de la room | Reposte le panneau de contrôle dans le chat vocal de ta room. |
+| `!clear` | `!clearchat`, `!purgechat`, `!purge` | Owner de la room **ou** Manage Messages | Supprime tous les messages du chat. Après un clear, utilise `!panel` pour remettre les boutons. |
 
-### `!panel` / `!controlpanel` / `!roompanel`
-- À utiliser **dans le chat de ta room vocale** temporaire.
-- Tu dois être le **owner** de la room.
-- Reposte l'embed + les boutons (Lock, Unlock, Rename, Kick, Transfer, Check Level).
-- Utile après un `!clear` qui a supprimé le panneau.
+---
 
-### `!clear` / `!clearchat` / `!purgechat` / `!purge`
-- Efface le maximum de messages possible (limite Discord : messages de moins de 14 jours en bulk).
-- Dans une **room bot-managed** : seul l'**owner** peut clear (sauf si tu as Manage Messages).
-- Dans un channel normal : il faut **Manage Messages**.
-- Le bot doit aussi avoir **Manage Messages**.
+## Admin (Manage Server)
 
-### `!post` / `!say` / `!echo` [message]
-- Exemple : `!post Bienvenue à tous sur le serveur !`
-- Le bot **supprime** ta commande et **envoie** le même texte à sa place.
-- Si tu attaches une image/fichier au message `!post`, le bot reposte le texte + les fichiers.
-- Utile pour les annonces sans montrer qui a écrit la commande.
+| Commande | Aliases | Description |
+|----------|---------|-------------|
+| `!checkticketcategory` | — | Affiche la configuration de la catégorie tickets. |
+| `!setnotifications` | `!mentionsonly`, `!notifmentions` | Met les notifications par défaut du serveur sur **@mentions only**. |
+| `!postroles` | — | Poste le menu de sélection des rôles jeux. |
+| `!syncroles` | `!syncjoinroles` | Donne les 5 rôles join aux membres qui ne les ont pas (`!syncroles` ou `!syncroles @user`). |
+| `!ticketpanel` | `!go` | Poste le panneau de tickets texte. |
 
-### `!setnotifications` / `!mentionsonly` / `!notifmentions`
-- Change le réglage serveur → notifications par défaut = **mentions seulement**.
-- Chaque membre doit encore configurer :
-  - Clic sur l'icône du serveur → Notification Settings → Only @mentions
-  - Clic droit sur la catégorie lounge → Notification Settings → Only @mentions
+---
 
-### `!postroles`
-- Poste un embed **"Select your roles"** avec un menu multi-sélection.
-- Jeux configurés : Free Fire, Rust, Call of Duty, GTA V, Brawlhalla, CS GO, Fortnite, Valorant, League of Legends, Minecraft.
-- Le bot enlève les anciens rôles jeux et assigne ceux choisis.
+## Messages (Manage Messages)
 
-### `!testlevelup` [@membre] [ancien_niveau] [nouveau_niveau]
-- Commande de **test** pour voir la carte image de level-up.
-- Exemple : `!testlevelup @Ahmed 5 6`
+| Commande | Aliases | Description |
+|----------|---------|-------------|
+| `!post` | `!say`, `!echo` | Reposte ton message au nom du bot (supprime ta commande). Supporte les fichiers attachés. |
 
-### `!testwelcome` [@membre]
-- Commande de **test** pour la carte de bienvenue personnalisée (avatar + nom sur fond).
+---
+
+## Tickets (Staff)
+
+| Commande | Aliases | Description |
+|----------|---------|-------------|
+| `!closeticket` | `!cv` | Ferme le ticket actuel (à utiliser dans le channel ticket). |
+
+---
+
+## Giveaway (Rôle Giveaway Admin)
+
+| Commande | Aliases | Description |
+|----------|---------|-------------|
+| `!giveaway` | — | Lance un giveaway via DM (prix, durée, gagnants, random/ID). |
+| `!stop` | — | Arrête le giveaway en cours (host seulement). |
+| `!kickuser` | — | Retire ou bloque un membre du giveaway actif. |
+
+---
+
+## Modération / Punishment
+
+**Staff** = rôle Staff **ou** permission **Manage Server** / **Moderate Members** / **Ban Members**
+
+| Commande | Aliases | Usage | Description |
+|----------|---------|-------|-------------|
+| `!ban` | — | `!ban @user reason` | Ban + carte punishment. |
+| `!timeout` | `!to` | `!timeout @user 1h reason` | Timeout Discord. |
+| `!chatmute` | `!cmute` | `!chatmute @user 30m reason` | Chat mute (rôle + timeout + suppression auto des messages). |
+| `!voicemute` | `!vmute` | `!voicemute @user 1h reason` | Voice mute (rôle + server mute en vocal). |
+| `!untimeout` | `!unchatmute`, `!unmutechat` | `!untimeout @user` | Retire le chat mute. |
+| `!unmute` | `!unvmute`, `!unvoicemute` | `!unmute @user` | Retire le voice mute. |
+| `!warn` | `!warning` | `!warn @user reason` | Avertissement + rôles automatiques. |
+| `!warnings` | `!warns`, `!getwarns` | `!warnings @user` | Affiche le compteur de warnings. |
+| `!clearwarn` | `!removewarn`, `!unwarn`, `!clearwarnings` | `!clearwarn @user` / `!clearwarn @user 1` | Efface les warnings et retire les rôles/mutes liés. |
+| `!testpunishment` | `!testpunish` | `!testpunishment ban @user` | Prévisualise une carte punishment. |
+
+### Système `!warn`
+
+| Warn | Action | Cartes dans le log |
+|------|--------|-------------------|
+| **1** | Rôle warn 1 | WARN |
+| **2** | + Rôle warn 2 | WARN |
+| **3** | Retire warn 1+2, chat mute 1j + voice mute, **compteur → 0** | WARN + CHAT MUTE + VOICE MUTE (punisher: bot, reason: `3 warn`) |
+| **4e warn** | Recommence le cycle à 1 | WARN |
+
+### `!clearwarn` — sync des rôles
+
+| Compteur après | Rôles retirés |
+|----------------|---------------|
+| **0/3** | Warn 1 + Warn 2 + chat mute + voice mute |
+| **1/3** | Warn 2 seulement |
+| **2/3** | Aucun rôle supplémentaire |
+
+---
+
+## Test / Debug
+
+| Commande | Aliases | Description |
+|----------|---------|-------------|
+| `!testlevelup` | — | Prévisualise la carte level-up. Ex. : `!testlevelup @user 2 3` |
+| `!testwelcome` | — | Envoie une carte de bienvenue test. |
+| `!testpunishment` | `!testpunish` | Prévisualise une carte punishment. |
 
 ---
 
@@ -72,12 +114,12 @@ Quand tu rejoins un channel **Join-to-Create**, le bot crée ta room et envoie c
 
 | Bouton | Action |
 |--------|--------|
-| **Lock** 🔒 | Verrouille la room : seules les personnes **déjà dedans** peuvent rester. Personne d'autre ne peut rejoindre. |
+| **Lock** 🔒 | Verrouille la room : seules les personnes **déjà dedans** peuvent rester. |
 | **Unlock** 🔓 | Déverrouille — les autres peuvent rejoindre à nouveau. |
-| **Rename** 📝 | Ouvre un formulaire pour changer le nom de la room (max 30 caractères). |
-| **Kick** 👞 | Menu pour choisir un membre et le **déconnecter** du vocal. |
-| **Transfer** 👑 | Transfère la propriété de la room à un autre membre présent dans le vocal. |
-| **Check Level** 📊 | Affiche ton niveau vocal, temps en minutes, et progression (message privé éphémère). |
+| **Rename** 📝 | Change le nom de la room (max 30 caractères). |
+| **Kick** 👞 | Déconnecte un membre du vocal. |
+| **Transfer** 👑 | Transfère la propriété de la room. |
+| **Check Level** 📊 | Affiche ton niveau vocal (message éphémère). |
 
 ---
 
@@ -94,7 +136,6 @@ Quand tu rejoins un channel **Join-to-Create**, le bot crée ta room et envoie c
 ## Fonctionnalités automatiques (sans commande)
 
 ### Join-to-Create (rooms temporaires)
-En rejoignant l'un de ces channels vocaux, le bot crée une **sous-room privée** :
 
 | Channel trigger | Nom de la room | Accès |
 |-----------------|----------------|-------|
@@ -102,64 +143,73 @@ En rejoignant l'un de ces channels vocaux, le bot crée une **sous-room privée*
 | **Support** | `Support \| {username}` | Staff + owner |
 | **Verification 1 / 2** | `Verify \| {username}` | Staff + owner |
 
-- `{username}` = pseudo Discord du membre (`member.name`).
-- La room est **supprimée automatiquement** quand tout le monde la quitte.
-- Si l'owner quitte mais d'autres restent → après **60 secondes**, l'ownership passe **aléatoirement** à quelqu'un d'autre dans la room (lounge seulement).
-- **Après restart du bot** : les rooms temporaires **vides** sont supprimées ; les rooms avec des membres sont re-enregistrées.
+- La room est **supprimée** quand tout le monde la quitte.
+- Si l'owner quitte mais d'autres restent → après **60 secondes**, ownership aléatoire (lounge).
+- Après restart : rooms vides supprimées, rooms occupées re-enregistrées.
 
 ### Bienvenue (`on_member_join`)
-- Donne le rôle **Not Verified** au nouveau membre.
+
+- Donne **Not Verified** + **5 rôles join** au nouveau membre.
 - Envoie une **carte image de bienvenue** dans le channel welcome.
 
+### Chat mute actif
+
+- Si un membre a le rôle chat mute ou un timeout → le bot **supprime** ses messages dans tous les channels.
+
+### Voice mute actif
+
+- Si un membre a le rôle voice mute et rejoint un vocal → le bot applique un **server mute** automatique.
+
 ### Vérification vocale
-- Si un membre **Not Verified** entre dans Verification 1 ou 2 → **DM aux staff** avec alerte.
+
+- Membre **Not Verified** dans Verification 1 ou 2 → **DM aux staff**.
 
 ### Support vocal
-- Si un membre normal (pas staff/support) rejoint le channel Support → **notification aux rôles staff**.
+
+- Membre normal dans Support → **notification aux staff**.
 
 ### Système de levels vocal
-- **+1 minute** de temps vocal chaque minute où tu es en vocal actif (pas self-deaf, pas bot).
-- Ne compte **pas** dans : Create channel, Support hub, Verification hubs, channel bot statique.
+
+- **+1 minute** par minute en vocal actif (pas self-deaf, pas bot).
 - Level-up annoncé dans **#level-log** avec carte image.
-- Rôles auto assignés actuellement : **Lv 10**, **Lv 20**, **Lv 30+** (rôles Lv 40–100 configurés mais pas encore branchés dans le code).
+- Rôles auto : **Lv 10**, **Lv 20**, **Lv 30+**.
 - Formule : Lv1 = 5 min, puis +10, +15, +20 min… entre chaque level.
-- Backup auto des données dans un channel Discord + fichier `levels_database.json`.
+- Backup auto : channel Discord + `data/levels_database.json`.
 
 ### Bot statique
-- Le bot reste connecté en **muet/sourd** dans son channel vocal fixe.
-- Status : **Do Not Disturb** (rouge).
-- Message de bienvenue maintenu dans le **Bot-Chat** channel.
+
+- Connecté en **muet/sourd** dans son channel vocal fixe.
+- Status : **Do Not Disturb**.
+- Message maintenu dans le **Bot-Chat** channel.
 
 ### Au démarrage
-- Charge la base de levels (local ou backup Discord).
-- **Nettoie les temp voice vides** et ré-enregistre celles qui ont encore des membres.
-- Ré-enregistre les panneaux des rooms existantes.
-- Applique les notifications @mentions (si activé dans `.env`).
-- Health check HTTP sur le port `PORT` (pour Render/hosting).
+
+- Charge levels + warnings.
+- Nettoie les temp voice vides.
+- Ré-enregistre panneaux et tickets.
+- Health check HTTP sur `PORT` (Render/hosting).
 
 ---
 
 ## Version `bot_all_in_one.py` (Pydroid / téléphone)
 
-Version **réduite** pour tourner sur téléphone. Commandes disponibles :
+Version **réduite** pour tourner sur téléphone :
 
 | Commande | Description |
 |----------|-------------|
-| `!level` | Affiche level + XP (système simplifié : +10 XP/min, level = XP ÷ 150). |
+| `!level` | Affiche level + XP (système simplifié). |
 
-**Pas inclus** dans la version all-in-one : `!panel`, `!clear`, `!post`, `!postroles`, `!setnotifications`, Transfer, Support rooms, cartes level-up avancées, rôles jeux.
-
-- Lounge nommée : `🎙️|{username} ✓`
-- Nettoyage des lounges vides au démarrage.
-- Boutons du panneau (version simple) : Lock, Unlock, Rename, Kick, Level — **sans** Transfer.
+**Pas inclus** : modération, giveaway, tickets, punishment cards, sync roles, etc.
 
 ---
 
 ## Permissions requises pour le bot
 
-- Manage Channels, Manage Messages, Move Members  
-- Manage Roles (rôles jeux + levels + Not Verified)  
-- Manage Server (pour `!setnotifications`)  
+- Manage Channels, Manage Messages, Move Members, **Mute Members**
+- Manage Roles (rôles jeux, levels, warns, join, mutes)
+- Manage Server (pour `!setnotifications`)
+- Moderate Members (timeouts, mutes)
+- Ban Members (pour `!ban`)
 - Le rôle du bot doit être **au-dessus** des rôles qu'il assigne.
 
 ---
@@ -172,3 +222,14 @@ Version **réduite** pour tourner sur téléphone. Commandes disponibles :
 | `BOT_CHAT_CHANNEL_ID` | Channel du message bot-chat |
 | `BOT_CHAT_MESSAGE` | Texte du message bot-chat |
 | `SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS` | `true` = auto @mentions au démarrage |
+| `TICKET_CATEGORY_ID` | ID catégorie tickets (optionnel) |
+
+---
+
+## Preview punishment card (local)
+
+```powershell
+python preview_punishment_card.py ban
+```
+
+Génère `preview_output/ban.png` sans lancer le bot.
