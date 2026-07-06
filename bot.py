@@ -131,6 +131,22 @@ ROLE_LVL_70 = 1518805913530535987
 ROLE_LVL_80 = 1518806076009746543
 ROLE_LVL_90 = 1518806185896185936
 ROLE_LVL_100 = 1518806344373637271
+ROLE_LVL_200 = 1523427665913319574
+
+LEVEL_ROLE_TIERS = (
+    (10, ROLE_LVL_10),
+    (20, ROLE_LVL_20),
+    (30, ROLE_LVL_30),
+    (40, ROLE_LVL_40),
+    (50, ROLE_LVL_50),
+    (60, ROLE_LVL_60),
+    (70, ROLE_LVL_70),
+    (80, ROLE_LVL_80),
+    (90, ROLE_LVL_90),
+    (100, ROLE_LVL_100),
+    (200, ROLE_LVL_200),
+)
+LEVEL_ROLE_IDS = tuple(role_id for _, role_id in LEVEL_ROLE_TIERS)
 
 # Voice leveling: Lv1 = 5 min, Lv2 = +10 min (15 total), Lv3 = +15 min (30 total), ...
 LEVEL_MINUTES_BASE = 5
@@ -153,6 +169,32 @@ def level_from_voice_minutes(minutes: int) -> int:
 def minutes_for_next_level(current_level: int) -> int:
     """Minutes needed to go from `current_level` to the next level."""
     return LEVEL_MINUTES_BASE * (current_level + 1)
+
+
+def _level_role_id_for_level(level: int) -> int | None:
+    if level < LEVEL_ROLE_TIERS[0][0]:
+        return None
+    role_id = None
+    for threshold, rid in LEVEL_ROLE_TIERS:
+        if level >= threshold:
+            role_id = rid
+    return role_id
+
+
+async def _sync_level_voice_roles(member: discord.Member, level: int) -> None:
+    guild = member.guild
+    target_role_id = _level_role_id_for_level(level)
+    to_remove = [
+        role
+        for role_id in LEVEL_ROLE_IDS
+        if role_id != target_role_id and (role := guild.get_role(role_id)) and role in member.roles
+    ]
+    if to_remove:
+        await member.remove_roles(*to_remove, reason=f"Voice level role sync (Lv {level})")
+    if target_role_id:
+        target_role = guild.get_role(target_role_id)
+        if target_role and target_role not in member.roles:
+            await member.add_roles(target_role, reason=f"Reached voice level {level}")
 
 
 def _normalize_user_level_data(raw: dict) -> dict:
@@ -2263,18 +2305,12 @@ async def update_levels_task():
                                 embed_lvl.set_thumbnail(url=member.display_avatar.url)
                                 await log_channel.send(embed=embed_lvl)
 
-                        if current_lvl >= 10 and current_lvl < 20:
-                            role = guild.get_role(ROLE_LVL_10)
-                            if role and role not in member.roles:
-                                await member.add_roles(role)
-                        elif current_lvl >= 20 and current_lvl < 30:
-                            role = guild.get_role(ROLE_LVL_20)
-                            if role and role not in member.roles:
-                                await member.add_roles(role)
-                        elif current_lvl >= 30:
-                            role = guild.get_role(ROLE_LVL_30)
-                            if role and role not in member.roles:
-                                await member.add_roles(role)
+                        try:
+                            await _sync_level_voice_roles(member, current_lvl)
+                        except discord.Forbidden:
+                            print(f"Level role sync forbidden for {member.id} at Lv {current_lvl}")
+                        except discord.HTTPException as exc:
+                            print(f"Level role sync failed for {member.id}: {exc.text}")
                 except Exception as e:
                     print(f"Level update failed for {member.id}: {e}")
 
