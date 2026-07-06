@@ -257,6 +257,7 @@ bot = commands.Bot(command_prefix="!", intents=intents, status=discord.Status.dn
 
 owners = {}
 room_kinds = {}
+room_nsfw_enabled: dict[int, bool] = {}
 owner_transfer_tasks = {}
 OWNER_ABSENCE_SECONDS = 60
 locked_rooms = set()
@@ -392,6 +393,7 @@ async def _create_join_to_create_room(member, trigger_channel):
     print(f"Temp room created: {new_channel.name} → category {cat_name}")
     owners[new_channel.id] = member.id
     room_kinds[new_channel.id] = config["kind"]
+    room_nsfw_enabled[new_channel.id] = False
     await member.move_to(new_channel)
 
     await _send_room_control_panel(new_channel, member, kind=config["kind"])
@@ -433,16 +435,23 @@ def _strip_nsfw_room_prefix(channel_name: str) -> str:
     return channel_name
 
 
+def _channel_has_nsfw_label(channel_id: int, channel_name: str) -> bool:
+    if channel_id in room_nsfw_enabled:
+        return room_nsfw_enabled[channel_id]
+    return channel_name.startswith(NSFW_ROOM_NAME_PREFIX)
+
+
 async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, str]:
     """Toggle 🔞 prefix on the voice channel name."""
-    name = channel.name
-    if name.startswith(NSFW_ROOM_NAME_PREFIX):
-        new_name = name[len(NSFW_ROOM_NAME_PREFIX) :]
-        enabled = False
-    else:
-        new_name = f"{NSFW_ROOM_NAME_PREFIX}{name}"[:100]
-        enabled = True
-    await channel.edit(name=new_name, nsfw=enabled, reason="Room owner toggled 18+ label")
+    fresh = await channel.guild.fetch_channel(channel.id)
+    if not isinstance(fresh, discord.VoiceChannel):
+        raise TypeError("Channel is not a voice channel")
+
+    base_name = _strip_nsfw_room_prefix(fresh.name)
+    enabled = not _channel_has_nsfw_label(fresh.id, fresh.name)
+    new_name = f"{NSFW_ROOM_NAME_PREFIX}{base_name}"[:100] if enabled else base_name[:100]
+    await fresh.edit(name=new_name, nsfw=enabled, reason="Room owner toggled 18+ label")
+    room_nsfw_enabled[fresh.id] = enabled
     return enabled, new_name
 
 
@@ -1232,6 +1241,7 @@ def _clear_temp_room_tracking(channel_id: int):
     _cancel_owner_transfer(channel_id)
     owners.pop(channel_id, None)
     room_kinds.pop(channel_id, None)
+    room_nsfw_enabled.pop(channel_id, None)
     locked_rooms.discard(channel_id)
     locked_room_members.pop(channel_id, None)
 
@@ -1327,6 +1337,7 @@ async def _cleanup_and_register_temp_rooms(guild):
             if owner:
                 owners[voice_channel.id] = owner.id
             room_kinds[voice_channel.id] = kind
+            room_nsfw_enabled[voice_channel.id] = voice_channel.name.startswith(NSFW_ROOM_NAME_PREFIX)
             print(
                 f"Re-registered temp room: {voice_channel.name} "
                 f"(kind={kind}, owner={owner.display_name if owner else 'unknown'})"
@@ -2201,21 +2212,34 @@ class ControlPanelView(discord.ui.View):
         if interaction.user.id != owners.get(self.channel_id):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
+        await interaction.response.defer(ephemeral=True)
+
         try:
             enabled, new_name = await _toggle_room_nsfw_mark(channel)
         except discord.Forbidden:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "I cannot rename this room (check **Manage Channels**).",
                 ephemeral=True,
             )
         except discord.HTTPException as exc:
-            return await interaction.response.send_message(f"Could not update room: {exc.text}", ephemeral=True)
+            if exc.status == 429:
+                retry = int(getattr(exc, "retry_after", 0) or 600)
+                mins = max(1, (retry + 59) // 60)
+                return await interaction.followup.send(
+                    f"⏳ Discord y7eb limit esm el room (2 marrat / 10 min). "
+                    f"Jarreb ba3d **{mins} min**.",
+                    ephemeral=True,
+                )
+            return await interaction.followup.send(f"Could not update room: {exc.text}", ephemeral=True)
+        except Exception as exc:
+            print(f"NSFW toggle failed for {self.channel_id}: {exc}")
+            return await interaction.followup.send(f"Could not update room: {exc}", ephemeral=True)
 
         if enabled:
             msg = f"🔞 **18+** label added — room is now **{new_name}**"
         else:
             msg = f"🔞 **18+** label removed — room is now **{new_name}**"
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 @bot.event
