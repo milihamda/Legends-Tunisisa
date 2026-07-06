@@ -263,7 +263,6 @@ room_nsfw_retry_tasks: dict[int, asyncio.Task] = {}
 owner_transfer_tasks = {}
 OWNER_ABSENCE_SECONDS = 60
 locked_rooms = set()
-locked_room_members = {}
 user_levels = {}
 DATA_DIR = Path("data")
 DB_FILE = str(DATA_DIR / "levels_database.json")
@@ -402,17 +401,46 @@ async def _create_join_to_create_room(member, trigger_channel):
 
 
 async def _set_room_locked(channel, *, locked: bool):
-    """Lock = whitelist current members + block everyone else from joining."""
+    """Lock = @everyone + Boy/Girl cannot connect; Staff + room owner can."""
+    guild = channel.guild
+
     if locked:
-        allowed = {m.id for m in channel.members if not m.bot}
-        locked_room_members[channel.id] = allowed
-        await channel.edit(user_limit=max(len(allowed), 1))
+        everyone = guild.default_role
+        everyone_ow = channel.overwrites_for(everyone)
+        everyone_ow.connect = False
+        await channel.set_permissions(everyone, overwrite=everyone_ow)
+
+        for role in _lounge_access_roles(guild):
+            role_ow = channel.overwrites_for(role)
+            role_ow.connect = False
+            await channel.set_permissions(role, overwrite=role_ow)
+
+        staff_role = guild.get_role(STAFF_ROLE_ID)
+        if staff_role:
+            await channel.set_permissions(
+                staff_role,
+                view_channel=True,
+                connect=True,
+                speak=True,
+            )
+
+        owner_id = owners.get(channel.id)
+        if owner_id:
+            owner = guild.get_member(owner_id)
+            if owner:
+                await channel.set_permissions(
+                    owner,
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    send_messages=True,
+                    manage_channels=True,
+                )
+
         locked_rooms.add(channel.id)
     else:
-        locked_room_members.pop(channel.id, None)
-        await channel.edit(user_limit=0)
         locked_rooms.discard(channel.id)
-        await _restore_room_join_permissions(channel, channel.guild)
+        await _restore_room_join_permissions(channel, guild)
 
 
 def _lounge_access_roles(guild):
@@ -420,7 +448,18 @@ def _lounge_access_roles(guild):
 
 
 async def _restore_room_join_permissions(channel, guild):
-    """Fix Boy/Girl perms after old permission-based lock hid the room."""
+    """Restore default lounge join perms after unlock."""
+    kind = room_kinds.get(channel.id, "lounge")
+    if kind != "lounge":
+        return
+
+    everyone = guild.default_role
+    await channel.set_permissions(
+        everyone,
+        view_channel=False,
+        connect=False,
+        send_messages=False,
+    )
     for role in _lounge_access_roles(guild):
         await channel.set_permissions(
             role,
@@ -1333,7 +1372,6 @@ def _clear_temp_room_tracking(channel_id: int):
     if retry_task and not retry_task.done():
         retry_task.cancel()
     locked_rooms.discard(channel_id)
-    locked_room_members.pop(channel_id, None)
 
 
 def _infer_room_owner(channel: discord.VoiceChannel) -> discord.Member | None:
@@ -2229,10 +2267,8 @@ class ControlPanelView(discord.ui.View):
             return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
 
         await _set_room_locked(channel, locked=True)
-        count = len(locked_room_members.get(channel.id, set()))
         await interaction.response.send_message(
-            f"Room locked — only the **{count}** people here can stay. "
-            "If someone leaves, no one can take their place until you unlock.",
+            "Room locked — **@everyone** cannot join. Only **Staff** and the room owner can connect.",
             ephemeral=True,
         )
 
@@ -3750,15 +3786,6 @@ async def on_voice_state_update(member, before, after):
     if not member.bot and after.channel:
         await _enforce_voice_mute_state(member)
 
-    if after.channel and after.channel.id in locked_rooms and not member.bot:
-        allowed = locked_room_members.get(after.channel.id, set())
-        if member.id not in allowed:
-            try:
-                await member.move_to(None)
-            except discord.HTTPException:
-                pass
-            return
-
     verification_hubs = {VERIFICATION_1_ID, VERIFICATION_2_ID}
 
     if after.channel and after.channel.id == SUPPORT_CHANNEL_ID:
@@ -3806,15 +3833,6 @@ async def on_voice_state_update(member, before, after):
         and len(before.channel.members) > 0
     ):
         _schedule_owner_transfer(before.channel, member.id)
-
-    if before.channel and before.channel.id in locked_rooms:
-        allowed = locked_room_members.get(before.channel.id)
-        if allowed is not None:
-            allowed.discard(member.id)
-        try:
-            await before.channel.edit(user_limit=max(len(before.channel.members), 1))
-        except discord.HTTPException:
-            pass
 
     if (
         before.channel
