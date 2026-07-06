@@ -287,6 +287,7 @@ current_giveaway_view = None
 
 LOUNGE_ROOM_NAME_PREFIX = "🎙️|"
 LOUNGE_ROOM_NAME_SUFFIX = " ✓"
+NSFW_ROOM_NAME_PREFIX = "🔞"
 
 
 def format_lounge_room_name(member_name: str) -> str:
@@ -424,6 +425,25 @@ async def _restore_room_join_permissions(channel, guild):
             speak=True,
             send_messages=True,
         )
+
+
+def _strip_nsfw_room_prefix(channel_name: str) -> str:
+    if channel_name.startswith(NSFW_ROOM_NAME_PREFIX):
+        return channel_name[len(NSFW_ROOM_NAME_PREFIX) :]
+    return channel_name
+
+
+async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, str]:
+    """Toggle 🔞 prefix on the voice channel name."""
+    name = channel.name
+    if name.startswith(NSFW_ROOM_NAME_PREFIX):
+        new_name = name[len(NSFW_ROOM_NAME_PREFIX) :]
+        enabled = False
+    else:
+        new_name = f"{NSFW_ROOM_NAME_PREFIX}{name}"[:100]
+        enabled = True
+    await channel.edit(name=new_name, nsfw=enabled, reason="Room owner toggled 18+ label")
+    return enabled, new_name
 
 
 PANEL_EMOJI_LOCK = discord.PartialEmoji(name="50376", id=1518983212066668675)
@@ -1192,13 +1212,14 @@ _JOIN_TO_CREATE_HUB_IDS = frozenset(JOIN_TO_CREATE_CHANNELS.keys())
 
 
 def _temp_room_kind_from_name(channel_name: str) -> str | None:
-    if channel_name.startswith(LOUNGE_ROOM_NAME_PREFIX) and channel_name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
+    name = _strip_nsfw_room_prefix(channel_name)
+    if name.startswith(LOUNGE_ROOM_NAME_PREFIX) and name.endswith(LOUNGE_ROOM_NAME_SUFFIX):
         return "lounge"
-    if channel_name.endswith("'s Lounge"):
+    if name.endswith("'s Lounge"):
         return "lounge"
-    if channel_name.startswith("Support | "):
+    if name.startswith("Support | "):
         return "support"
-    if channel_name.startswith("Verify | "):
+    if name.startswith("Verify | "):
         return "verification"
     return None
 
@@ -2086,6 +2107,16 @@ class ControlPanelView(discord.ui.View):
         level_btn.callback = self.check_level_button
         self.add_item(level_btn)
 
+        nsfw_btn = discord.ui.Button(
+            label="18+",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔞",
+            custom_id=f"legends:nsfw:{channel_id}",
+            row=2,
+        )
+        nsfw_btn.callback = self.nsfw_button
+        self.add_item(nsfw_btn)
+
     def _get_channel(self, interaction: discord.Interaction):
         return interaction.guild.get_channel(self.channel_id)
 
@@ -2162,6 +2193,29 @@ class ControlPanelView(discord.ui.View):
         )
         embed_stats.set_thumbnail(url=interaction.user.display_avatar.url)
         await interaction.response.send_message(embed=embed_stats, ephemeral=True)
+
+    async def nsfw_button(self, interaction: discord.Interaction):
+        channel = self._get_channel(interaction)
+        if not channel:
+            return await interaction.response.send_message("Room no longer exists.", ephemeral=True)
+        if interaction.user.id != owners.get(self.channel_id):
+            return await interaction.response.send_message("Only the room creator can use these controls.", ephemeral=True)
+
+        try:
+            enabled, new_name = await _toggle_room_nsfw_mark(channel)
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "I cannot rename this room (check **Manage Channels**).",
+                ephemeral=True,
+            )
+        except discord.HTTPException as exc:
+            return await interaction.response.send_message(f"Could not update room: {exc.text}", ephemeral=True)
+
+        if enabled:
+            msg = f"🔞 **18+** label added — room is now **{new_name}**"
+        else:
+            msg = f"🔞 **18+** label removed — room is now **{new_name}**"
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 @bot.event
