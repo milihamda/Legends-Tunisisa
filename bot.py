@@ -487,7 +487,7 @@ async def _apply_nsfw_room_mark(
     enabled: bool,
     reason: str,
 ) -> None:
-    await channel.edit(name=new_name, nsfw=enabled, reason=reason)
+    await channel.edit(name=new_name, reason=reason)
     room_nsfw_enabled[channel.id] = enabled
 
 
@@ -554,7 +554,7 @@ async def _toggle_room_nsfw_mark(channel: discord.VoiceChannel) -> tuple[bool, s
         if retry_task and not retry_task.done():
             retry_task.cancel()
 
-    if fresh.name == new_name and fresh.nsfw == enabled:
+    if fresh.name == new_name:
         room_nsfw_enabled[fresh.id] = enabled
         return enabled, new_name, None
 
