@@ -116,6 +116,10 @@ BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"
 BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "welcome to Bot-Chat")
 BOT_BUILD_ID = "2026-07-05-tickets-only-cat"
 
+DISCORD_BACKUP_INTERVAL_MINUTES = max(5, int(os.getenv("DISCORD_BACKUP_INTERVAL_MINUTES", "30")))
+LEVEL_UP_ANNOUNCE_CAP = max(1, int(os.getenv("LEVEL_UP_ANNOUNCE_CAP", "5")))
+BOT_CHAT_KEEPALIVE_MINUTES = max(5.0, float(os.getenv("BOT_CHAT_KEEPALIVE_MINUTES", "15")))
+
 # Server default: chat/voice-text notifications only on @mentions (not every message)
 SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS = os.getenv(
     "SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS", "true"
@@ -230,6 +234,8 @@ def _iter_level_voice_channels(guild: discord.Guild):
 def _start_background_tasks():
     if not update_levels_task.is_running():
         update_levels_task.start()
+    if not discord_backup_task.is_running():
+        discord_backup_task.start()
     if not bot_chat_keepalive_task.is_running():
         bot_chat_keepalive_task.start()
     if not empty_temp_rooms_cleanup_task.is_running():
@@ -273,8 +279,12 @@ ticket_counters: dict[int, int] = {}
 open_tickets_by_user: dict[int, int] = {}
 ticket_channels: dict[int, dict] = {}
 WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
+BACKUP_STATE_FILE = str(DATA_DIR / "backup_state.json")
 user_warnings: dict[int, int] = {}
 MAX_WARNS_BEFORE_BAN = 3
+_discord_backup_message_id: int | None = None
+_level_up_announce_count = 0
+_level_up_announce_bucket = 0
 
 WARN_1_ROLE_ID = 1523000242491097208
 WARN_2_ROLE_ID = 1523000417758347274
@@ -1737,6 +1747,57 @@ def _save_local_database_sync() -> bool:
         return False
 
 
+def _load_backup_state() -> None:
+    global _discord_backup_message_id
+    path = Path(BACKUP_STATE_FILE)
+    if not path.is_file():
+        _discord_backup_message_id = None
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        message_id = int(data.get("message_id", 0) or 0)
+        _discord_backup_message_id = message_id or None
+    except Exception as e:
+        print(f"Could not load backup state: {e}")
+        _discord_backup_message_id = None
+
+
+def _save_backup_state(message_id: int | None) -> None:
+    global _discord_backup_message_id
+    _discord_backup_message_id = message_id
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(BACKUP_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {"message_id": message_id, "channel_id": DATA_BACKUP_CHANNEL_ID},
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+    except Exception as e:
+        print(f"Could not save backup state: {e}")
+
+
+def _should_announce_level_up() -> bool:
+    """Cap level-up announcements to avoid flooding Discord when many users level at once."""
+    global _level_up_announce_count, _level_up_announce_bucket
+    bucket = int(time.time() // 60)
+    if bucket != _level_up_announce_bucket:
+        _level_up_announce_bucket = bucket
+        _level_up_announce_count = 0
+    if _level_up_announce_count >= LEVEL_UP_ANNOUNCE_CAP:
+        return False
+    _level_up_announce_count += 1
+    return True
+
+
+async def _await_rate_limit(exc: discord.HTTPException, *, label: str) -> None:
+    wait = float(getattr(exc, "retry_after", 5) or 5) + 0.5
+    print(f"{label}: rate limited, waiting {wait:.1f}s")
+    await asyncio.sleep(wait)
+
+
 def _pick_best_levels_data(*datasets: dict) -> dict:
     best: dict = {}
     best_score = -1
@@ -1796,41 +1857,63 @@ async def load_database_from_discord():
         print("No level data found — starting fresh.")
 
 
-async def save_database_to_discord():
+async def save_database_to_discord() -> bool:
+    """Upload levels backup to Discord. Runs on a schedule — not every level tick."""
     if not user_levels:
-        return
+        return False
     if not _save_local_database_sync():
-        return
+        return False
 
     channel = bot.get_channel(DATA_BACKUP_CHANNEL_ID)
     if not channel:
-        return
+        return False
 
-    try:
-        formatted_data = {str(k): v for k, v in user_levels.items()}
-        json_bytes = json.dumps(formatted_data, ensure_ascii=False, indent=2).encode("utf-8")
-        buffer = io.BytesIO(json_bytes)
-        buffer.seek(0)
-        backup_file = discord.File(buffer, filename="levels_database.json")
-        backup_embed = discord.Embed(
-            title="AUTOMATIC DATA BACKUP SECURED",
-            description=(
-                "Automated backup for server voice levels.\n"
-                "**DO NOT DELETE THIS MESSAGE.**\n"
-                "Attachment: `levels_database.json`"
-            ),
-            color=discord.Color.green(),
-        )
-        backup_message = await channel.send(embed=backup_embed, file=backup_file)
+    formatted_data = {str(k): v for k, v in user_levels.items()}
+    json_bytes = json.dumps(formatted_data, ensure_ascii=False, indent=2).encode("utf-8")
+    backup_embed = discord.Embed(
+        title="AUTOMATIC DATA BACKUP SECURED",
+        description=(
+            "Automated backup for server voice levels.\n"
+            "**DO NOT DELETE THIS MESSAGE.**\n"
+            f"Users tracked: `{len(user_levels)}` • Attachment: `levels_database.json`"
+        ),
+        color=discord.Color.green(),
+    )
+
+    if _discord_backup_message_id:
         try:
-            await channel.purge(
-                limit=10,
-                check=lambda m: m.author == bot.user and m.id != backup_message.id,
-            )
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"Cloud backup failed: {e}")
+            old = await channel.fetch_message(_discord_backup_message_id)
+            await old.delete()
+        except discord.NotFound:
+            _save_backup_state(None)
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                await _await_rate_limit(exc, label="Cloud backup delete")
+                try:
+                    old = await channel.fetch_message(_discord_backup_message_id)
+                    await old.delete()
+                except Exception as delete_exc:
+                    print(f"Could not delete old backup after retry: {delete_exc}")
+            else:
+                print(f"Could not delete old backup message: {exc}")
+
+    for attempt in range(3):
+        try:
+            backup_file = discord.File(io.BytesIO(json_bytes), filename="levels_database.json")
+            backup_message = await channel.send(embed=backup_embed, file=backup_file)
+            _save_backup_state(backup_message.id)
+            print(f"Cloud backup saved ({len(user_levels)} users).")
+            return True
+        except discord.HTTPException as exc:
+            if exc.status == 429 and attempt < 2:
+                await _await_rate_limit(exc, label="Cloud backup send")
+                continue
+            print(f"Cloud backup failed: {exc}")
+            return False
+        except Exception as e:
+            print(f"Cloud backup failed: {e}")
+            return False
+    return False
 
 
 def _load_warnings() -> None:
@@ -2384,6 +2467,11 @@ async def on_ready():
 
     await load_database_from_discord()
     _load_warnings()
+    _load_backup_state()
+    print(
+        f"Rate-limit settings: cloud backup every {DISCORD_BACKUP_INTERVAL_MINUTES}m, "
+        f"level-up cap {LEVEL_UP_ANNOUNCE_CAP}/min, bot-chat keepalive {BOT_CHAT_KEEPALIVE_MINUTES}m"
+    )
 
     log_channel = await _get_punishment_log_channel()
     if log_channel is None:
@@ -2434,7 +2522,7 @@ async def on_resumed():
     await bot.change_presence(status=discord.Status.dnd)
 
 
-@tasks.loop(minutes=5.0)
+@tasks.loop(minutes=BOT_CHAT_KEEPALIVE_MINUTES)
 async def bot_chat_keepalive_task():
     for guild in bot.guilds:
         try:
@@ -2465,6 +2553,19 @@ async def before_empty_temp_rooms_cleanup_task():
     await bot.wait_until_ready()
 
 
+@tasks.loop(minutes=DISCORD_BACKUP_INTERVAL_MINUTES)
+async def discord_backup_task():
+    try:
+        await save_database_to_discord()
+    except Exception as e:
+        print(f"Scheduled cloud backup failed: {e}")
+
+
+@discord_backup_task.before_loop
+async def before_discord_backup_task():
+    await bot.wait_until_ready()
+
+
 @tasks.loop(minutes=1.0)
 async def update_levels_task():
     data_changed = False
@@ -2491,7 +2592,7 @@ async def update_levels_task():
                     if new_calculated_level > old_lvl:
                         current_lvl = new_calculated_level
 
-                        if log_channel:
+                        if log_channel and _should_announce_level_up():
                             try:
                                 buffer = await build_level_up_card(member, old_lvl, current_lvl)
                                 image_file = discord.File(buffer, filename="level_up.png")
@@ -2505,30 +2606,42 @@ async def update_levels_task():
                                 )
                                 embed_lvl.set_image(url="attachment://level_up.png")
                                 await log_channel.send(file=image_file, embed=embed_lvl)
+                            except discord.HTTPException as exc:
+                                if exc.status == 429:
+                                    print(f"Level up card rate limited for {member.id}")
+                                else:
+                                    print(f"Level up card failed: {exc}")
+                                    try:
+                                        embed_lvl = discord.Embed(
+                                            title="LEVEL UP!",
+                                            description=(
+                                                f"{member.mention} reached **Level {current_lvl}**.\n"
+                                                f"*Voice Time: {user_data['voice_minutes']} min*"
+                                            ),
+                                            color=discord.Color.gold(),
+                                        )
+                                        embed_lvl.set_thumbnail(url=member.display_avatar.url)
+                                        await log_channel.send(embed=embed_lvl)
+                                    except Exception as fallback_exc:
+                                        print(f"Level up fallback failed: {fallback_exc}")
                             except Exception as e:
                                 print(f"Level up card failed: {e}")
-                                embed_lvl = discord.Embed(
-                                    title="LEVEL UP!",
-                                    description=(
-                                        f"{member.mention} reached **Level {current_lvl}**.\n"
-                                        f"*Voice Time: {user_data['voice_minutes']} min*"
-                                    ),
-                                    color=discord.Color.gold(),
-                                )
-                                embed_lvl.set_thumbnail(url=member.display_avatar.url)
-                                await log_channel.send(embed=embed_lvl)
 
-                        try:
-                            await _sync_level_voice_roles(member, current_lvl)
-                        except discord.Forbidden:
-                            print(f"Level role sync forbidden for {member.id} at Lv {current_lvl}")
-                        except discord.HTTPException as exc:
-                            print(f"Level role sync failed for {member.id}: {exc.text}")
+                        if _level_role_id_for_level(old_lvl) != _level_role_id_for_level(current_lvl):
+                            try:
+                                await _sync_level_voice_roles(member, current_lvl)
+                            except discord.Forbidden:
+                                print(f"Level role sync forbidden for {member.id} at Lv {current_lvl}")
+                            except discord.HTTPException as exc:
+                                if exc.status == 429:
+                                    print(f"Level role sync rate limited for {member.id}")
+                                else:
+                                    print(f"Level role sync failed for {member.id}: {exc.text}")
                 except Exception as e:
                     print(f"Level update failed for {member.id}: {e}")
 
     if data_changed:
-        await save_database_to_discord()
+        _save_local_database_sync()
 
 
 @update_levels_task.before_loop
