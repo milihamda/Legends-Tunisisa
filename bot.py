@@ -254,6 +254,7 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, status=discord.Status.dnd)
+_startup_done = False
 
 owners = {}
 room_kinds = {}
@@ -2371,7 +2372,15 @@ class ControlPanelView(discord.ui.View):
 
 @bot.event
 async def on_ready():
+    global _startup_done
     print(f"Logged in as {bot.user} (build {BOT_BUILD_ID})")
+
+    if _startup_done:
+        print("Reconnect — skipping heavy startup (avoids Discord rate limits).")
+        await bot.change_presence(status=discord.Status.dnd)
+        return
+
+    _startup_done = True
 
     await load_database_from_discord()
     _load_warnings()
@@ -2399,7 +2408,6 @@ async def on_ready():
 
     for guild in bot.guilds:
         try:
-            await guild.chunk()
             await _cleanup_and_register_temp_rooms(guild)
             await _register_existing_ticket_channels(guild)
             for channel_id in list(room_kinds.keys()):
@@ -2426,7 +2434,7 @@ async def on_resumed():
     await bot.change_presence(status=discord.Status.dnd)
 
 
-@tasks.loop(minutes=1.0)
+@tasks.loop(minutes=5.0)
 async def bot_chat_keepalive_task():
     for guild in bot.guilds:
         try:
@@ -3882,7 +3890,32 @@ async def _close_with_level_save():
 
 bot.close = _close_with_level_save
 
+def _login_retry_wait(attempt: int) -> int:
+    """Seconds to wait before retrying login after a global 429."""
+    return min(900, max(60, 30 * attempt))
+
+
 if __name__ == "__main__":
     if os.environ.get("PORT"):
         threading.Thread(target=_start_health_server, daemon=True).start()
-    bot.run(TOKEN)
+
+    max_login_attempts = 12
+    for attempt in range(1, max_login_attempts + 1):
+        try:
+            bot.run(TOKEN)
+            break
+        except discord.HTTPException as exc:
+            if exc.status != 429 or attempt >= max_login_attempts:
+                raise
+            wait = _login_retry_wait(attempt)
+            print(
+                f"Discord global rate limit on login "
+                f"(attempt {attempt}/{max_login_attempts}). "
+                f"Waiting {wait}s before retry — do not spam redeploy."
+            )
+            time.sleep(wait)
+    else:
+        raise SystemExit(
+            "Could not log in after repeated Discord rate limits. "
+            "Wait 15–30 min, ensure only one bot instance uses this token, then redeploy."
+        )
