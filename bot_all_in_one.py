@@ -77,7 +77,8 @@ intents.guilds = True
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, status=discord.Status.dnd)
+COMMAND_PREFIX = "?"
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, status=discord.Status.dnd)
 owners = {}
 user_levels = {}
 DB_FILE = "levels_database.json"
