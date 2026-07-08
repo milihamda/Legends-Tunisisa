@@ -3626,32 +3626,35 @@ async def _close_with_save():
 
 bot.close = _close_with_save
 
-def _login_retry_wait(attempt: int) -> int:
-    """Seconds to wait before retrying login after a global 429."""
-    return min(900, max(60, 30 * attempt))
+
+def _validate_token() -> None:
+    token = (TOKEN or "").strip()
+    if not token or token in ("your_bot_token_here", "your_main_bot_token_here"):
+        raise SystemExit(
+            "Invalid DISCORD_TOKEN. Set a real bot token in Render env vars or .env — "
+            "not the placeholder from .env.example."
+        )
 
 
 if __name__ == "__main__":
+    _validate_token()
+
     if os.environ.get("PORT"):
         threading.Thread(target=_start_health_server, daemon=True).start()
 
-    max_login_attempts = 12
-    for attempt in range(1, max_login_attempts + 1):
-        try:
-            bot.run(TOKEN)
-            break
-        except discord.HTTPException as exc:
-            if exc.status != 429 or attempt >= max_login_attempts:
-                raise
-            wait = _login_retry_wait(attempt)
-            print(
-                f"Discord global rate limit on login "
-                f"(attempt {attempt}/{max_login_attempts}). "
-                f"Waiting {wait}s before retry — do not spam redeploy."
-            )
-            time.sleep(wait)
-    else:
+    # bot.run() must be called only once per process — retrying on the same Client
+    # instance causes "RuntimeError: Session is closed".
+    try:
+        bot.run(TOKEN)
+    except discord.LoginFailure:
         raise SystemExit(
-            "Could not log in after repeated Discord rate limits. "
-            "Wait 15–30 min, ensure only one bot instance uses this token, then redeploy."
-        )
+            "Login failed: DISCORD_TOKEN is invalid or revoked. "
+            "Reset the token in Discord Developer Portal, update Render, then redeploy."
+        ) from None
+    except discord.HTTPException as exc:
+        if exc.status == 429:
+            raise SystemExit(
+                "Discord rate-limited login (429). Wait 15–30 minutes, "
+                "ensure only ONE instance uses this token (not PC + Render), then redeploy."
+            ) from None
+        raise
