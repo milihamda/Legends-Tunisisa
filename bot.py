@@ -110,9 +110,14 @@ PUNISHMENT_LOG_CHANNEL_ID = 1522676265381793876
 BOT_VOICE_CHANNEL_ID = 1518025649225470072
 BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"))
 BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "welcome to Bot-Chat")
-BOT_BUILD_ID = "2026-07-08-main-split"
+BOT_BUILD_ID = "2026-07-08-rate-limit-safe"
 
-BOT_CHAT_KEEPALIVE_MINUTES = max(5.0, float(os.getenv("BOT_CHAT_KEEPALIVE_MINUTES", "15")))
+BOT_CHAT_KEEPALIVE_MINUTES = max(5.0, float(os.getenv("BOT_CHAT_KEEPALIVE_MINUTES", "30")))
+EMPTY_ROOM_CLEANUP_MINUTES = max(5.0, float(os.getenv("EMPTY_ROOM_CLEANUP_MINUTES", "10")))
+PUNISHMENT_POST_CAP = max(1, int(os.getenv("PUNISHMENT_POST_CAP", "5")))
+WELCOME_POST_CAP = max(1, int(os.getenv("WELCOME_POST_CAP", "5")))
+SYNCROLES_MEMBER_DELAY = max(0.0, float(os.getenv("SYNCROLES_MEMBER_DELAY", "0.35")))
+GUILD_INIT_STEP_DELAY = max(0.0, float(os.getenv("GUILD_INIT_STEP_DELAY", "0.4")))
 
 # Server default: chat/voice-text notifications only on @mentions (not every message)
 SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS = os.getenv(
@@ -132,8 +137,58 @@ intents.guilds = True
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, status=discord.Status.dnd)
+COMMAND_PREFIX = "?"
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, status=discord.Status.dnd)
 _startup_done = False
+_punishment_post_count = 0
+_punishment_post_bucket = 0
+_welcome_post_count = 0
+_welcome_post_bucket = 0
+
+
+async def _await_rate_limit(exc: discord.HTTPException, *, label: str) -> None:
+    wait = float(getattr(exc, "retry_after", 5) or 5) + 0.5
+    print(f"{label}: rate limited, waiting {wait:.1f}s")
+    await asyncio.sleep(wait)
+
+
+def _should_post_punishment() -> bool:
+    global _punishment_post_count, _punishment_post_bucket
+    bucket = int(time.time() // 60)
+    if bucket != _punishment_post_bucket:
+        _punishment_post_bucket = bucket
+        _punishment_post_count = 0
+    if _punishment_post_count >= PUNISHMENT_POST_CAP:
+        return False
+    _punishment_post_count += 1
+    return True
+
+
+def _should_post_welcome() -> bool:
+    global _welcome_post_count, _welcome_post_bucket
+    bucket = int(time.time() // 60)
+    if bucket != _welcome_post_bucket:
+        _welcome_post_bucket = bucket
+        _welcome_post_count = 0
+    if _welcome_post_count >= WELCOME_POST_CAP:
+        return False
+    _welcome_post_count += 1
+    return True
+
+
+async def _api_call_with_retry(coro_factory, *, label: str, attempts: int = 3):
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            return await coro_factory()
+        except discord.HTTPException as exc:
+            last_exc = exc
+            if exc.status == 429 and attempt < attempts - 1:
+                await _await_rate_limit(exc, label=label)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
 
 owners = {}
 room_kinds = {}
@@ -626,7 +681,7 @@ async def _send_room_control_panel(channel, owner, embed=None, *, kind="lounge")
                     description=(
                         f"Your room **{channel.name}** is ready, but I could not post the control panel.\n"
                         "Move my bot role **above** other roles and give **Send Messages** in voice channels.\n"
-                        "Then use `!panel` inside the room chat to repost it."
+                        f"Then use `{COMMAND_PREFIX}panel` inside the room chat to repost it."
                     ),
                     color=discord.Color.orange(),
                 )
@@ -738,7 +793,7 @@ def _get_bot_chat_channel(guild):
 async def _apply_guild_notification_settings(guild, *, force=False):
     """Set guild default notifications to @mentions only (Manage Server required)."""
     if not SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS and not force:
-        return False, "Auto setup is off. Use `!setnotifications` or enable `SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS`."
+        return False, f"Auto setup is off. Use `{COMMAND_PREFIX}setnotifications` or enable `SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS`."
 
     if guild.default_notifications == discord.NotificationLevel.only_mentions:
         return True, "Server notifications are already set to **@mentions only**."
@@ -767,16 +822,30 @@ async def _refresh_bot_chat_welcome_message(guild):
     message_id = bot_chat_messages.get(guild.id)
     if message_id:
         try:
-            await channel.fetch_message(message_id)
+            await _api_call_with_retry(
+                lambda: channel.fetch_message(message_id),
+                label="Bot chat fetch",
+            )
             return
         except discord.NotFound:
             bot_chat_messages.pop(guild.id, None)
         except discord.Forbidden:
             return
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                print("Bot chat keepalive skipped (rate limited).")
+            return
 
     chat_text = (BOT_CHAT_MESSAGE or "welcome to Bot-Chat")[:2000]
-    message = await channel.send(chat_text)
-    bot_chat_messages[guild.id] = message.id
+    try:
+        message = await _api_call_with_retry(
+            lambda: channel.send(chat_text),
+            label="Bot chat send",
+        )
+        bot_chat_messages[guild.id] = message.id
+    except discord.HTTPException as exc:
+        if exc.status == 429:
+            print("Bot chat welcome send skipped (rate limited).")
 
 
 def _ticket_topic(user_id: int, category_key: str) -> str:
@@ -2063,7 +2132,7 @@ class ControlPanelView(discord.ui.View):
     async def check_level_button(self, interaction: discord.Interaction):
         await interaction.response.send_message(
             "Voice levels are tracked by the **Levels Bot**.\n"
-            "Use `!level` or `!level @user` in any text channel.",
+            f"Use `{COMMAND_PREFIX}level` or `{COMMAND_PREFIX}level @user` in any text channel.",
             ephemeral=True,
         )
 
@@ -2118,7 +2187,11 @@ async def on_ready():
     _startup_done = True
 
     _load_warnings()
-    print(f"Rate-limit settings: bot-chat keepalive {BOT_CHAT_KEEPALIVE_MINUTES}m")
+    print(
+        f"Rate-limit settings: bot-chat keepalive {BOT_CHAT_KEEPALIVE_MINUTES}m, "
+        f"room cleanup {EMPTY_ROOM_CLEANUP_MINUTES}m, "
+        f"punishment cap {PUNISHMENT_POST_CAP}/min, welcome cap {WELCOME_POST_CAP}/min"
+    )
 
     log_channel = await _get_punishment_log_channel()
     if log_channel is None:
@@ -2144,7 +2217,11 @@ async def on_ready():
     for guild in bot.guilds:
         try:
             await _cleanup_and_register_temp_rooms(guild)
+            if GUILD_INIT_STEP_DELAY:
+                await asyncio.sleep(GUILD_INIT_STEP_DELAY)
             await _register_existing_ticket_channels(guild)
+            if GUILD_INIT_STEP_DELAY:
+                await asyncio.sleep(GUILD_INIT_STEP_DELAY)
             for channel_id in list(room_kinds.keys()):
                 ch = guild.get_channel(channel_id)
                 emojis = _get_panel_emojis(guild) if ch else PANEL_EMOJI_FALLBACKS
@@ -2154,11 +2231,17 @@ async def on_ready():
                 print(message)
             elif not success and SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS:
                 print(f"{guild.name}: {message}")
+            if GUILD_INIT_STEP_DELAY:
+                await asyncio.sleep(GUILD_INIT_STEP_DELAY)
             await _refresh_bot_chat_welcome_message(guild)
+            if GUILD_INIT_STEP_DELAY:
+                await asyncio.sleep(GUILD_INIT_STEP_DELAY)
             await _ensure_ticket_panel(guild)
             await _log_ticket_setup(guild)
         except Exception as e:
             print(f"Guild init failed for {guild.name}: {e}")
+        if GUILD_INIT_STEP_DELAY:
+            await asyncio.sleep(GUILD_INIT_STEP_DELAY)
 
     await bot.change_presence(status=discord.Status.dnd)
     print("System online.")
@@ -2178,7 +2261,7 @@ async def bot_chat_keepalive_task():
             print(f"Bot chat keepalive failed for {guild.name}: {e}")
 
 
-@tasks.loop(minutes=5.0)
+@tasks.loop(minutes=EMPTY_ROOM_CLEANUP_MINUTES)
 async def empty_temp_rooms_cleanup_task():
     for guild in bot.guilds:
         try:
@@ -2272,7 +2355,7 @@ async def test_welcome_cmd(ctx, member: discord.Member = None):
 async def repost_panel_cmd(ctx):
     """Repost room control panel in your current voice room."""
     if not ctx.author.voice or not ctx.author.voice.channel:
-        return await ctx.send("Join your voice room first, then run `!panel` in its chat.", delete_after=10)
+        return await ctx.send(f"Join your voice room first, then run `{COMMAND_PREFIX}panel` in its chat.", delete_after=10)
 
     channel = ctx.author.voice.channel
     is_bot_room = channel.id in owners or channel.id in room_kinds
@@ -2336,7 +2419,7 @@ async def clear_chat_cmd(ctx):
         removed = await _purge_channel_messages(channel)
         msg = f"Chat cleared by **{ctx.author.display_name}** ({removed} message(s) removed)."
         if _is_bot_managed_voice_room(channel):
-            msg += "\nUse `!panel` to repost the control panel."
+            msg += f"\nUse `{COMMAND_PREFIX}panel` to repost the control panel."
         await channel.send(msg, delete_after=5)
     except discord.Forbidden:
         await channel.send("I cannot delete messages here.", delete_after=8)
@@ -2436,7 +2519,7 @@ async def sync_roles_cmd(ctx, member: discord.Member = None):
         return await status.edit(
             content=(
                 "❌ Timeout fi jib el membres (barcha 3bed).\n"
-                "Jarreb: `!syncroles @user` 3la wa7ed wa7ed."
+                f"Jarreb: `{COMMAND_PREFIX}syncroles @user` 3la wa7ed wa7ed."
             )
         )
     except discord.Forbidden:
@@ -2477,7 +2560,10 @@ async def sync_roles_cmd(ctx, member: discord.Member = None):
             if first_error is None:
                 first_error = f"{target.display_name}: {exc.text}"
             if exc.status == 429:
-                await asyncio.sleep(getattr(exc, "retry_after", 2) or 2)
+                await _await_rate_limit(exc, label="syncroles")
+
+        if index < total and SYNCROLES_MEMBER_DELAY:
+            await asyncio.sleep(SYNCROLES_MEMBER_DELAY)
 
         if index % 15 == 0 or index == total:
             try:
@@ -2566,12 +2652,12 @@ async def close_ticket_cmd(ctx, *, reason: str = "Closed by staff"):
 @bot.command(name="post", aliases=["say", "echo"])
 @commands.has_permissions(manage_messages=True)
 async def post_cmd(ctx, *, message: str = None):
-    """Repost your message as the bot (deletes your command). Usage: !post Hello everyone"""
+    """Repost your message as the bot (deletes your command). Usage: ?post Hello everyone"""
     content = (message or "").strip()
     attachments = list(ctx.message.attachments)
 
     if not content and not attachments:
-        return await ctx.send("Usage: `!post your message here`", delete_after=8)
+        return await ctx.send(f"Usage: `{COMMAND_PREFIX}post your message here`", delete_after=8)
 
     files = [await attachment.to_file() for attachment in attachments]
 
@@ -2635,12 +2721,12 @@ async def giveaway_cmd(ctx):
         mode = msg_mode.content.strip().lower()
 
     except asyncio.TimeoutError:
-        return await ctx.author.send("❌ Btit barcha ma jawebtnech! 3awed ekteb `!giveaway` min jdid.")
+        return await ctx.author.send(f"❌ Btit barcha ma jawebtnech! 3awed ekteb `{COMMAND_PREFIX}giveaway` min jdid.")
     except ValueError:
         return await ctx.author.send("❌ Ghalta fil ar9am! 3awed min jdid w ekteb ar9am s7i7a.")
 
     await ctx.author.send(
-        "✅ Sayé, el giveaway hebet tawa fil serveur! (Tnajem tekteb `!stop` houni ken t7eb twa9afha wa9t ma t7eb)."
+        f"✅ Sayé, el giveaway hebet tawa fil serveur! (Tnajem tekteb `{COMMAND_PREFIX}stop` houni ken t7eb twa9afha wa9t ma t7eb)."
     )
 
     end_time = int(time.time() + (hours * 3600))
@@ -2958,8 +3044,25 @@ async def _post_punishment_card(
         await _finish_staff_command(ctx, False)
         return False
 
+    if not preview and not _should_post_punishment():
+        print(f"Punishment log post skipped (cap {PUNISHMENT_POST_CAP}/min).")
+        await ctx.send(
+            "Punishment applied but log card delayed (rate limit protection).",
+            delete_after=12,
+        )
+        if finish_command:
+            await _finish_staff_command(ctx, True, log_channel)
+        return True
+
     try:
-        await _send_to_punishment_log(log_channel, content, image_file)
+        await _api_call_with_retry(
+            lambda: _send_to_punishment_log(
+                log_channel,
+                content,
+                discord.File(io.BytesIO(card_bytes), filename="punishment.png"),
+            ),
+            label="Punishment log post",
+        )
     except discord.Forbidden:
         print(f"Forbidden posting punishment to {log_channel.id} ({type(log_channel).__name__})")
         await _finish_staff_command(ctx, False, log_channel)
@@ -3038,7 +3141,7 @@ async def ban_cmd(ctx, member: discord.Member, *, reason: str = "No reason provi
 @_punishment_staff_check()
 @commands.bot_has_permissions(moderate_members=True)
 async def timeout_cmd(ctx, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
-    """Timeout a member. Example: !timeout @user 1h spam"""
+    """Timeout a member. Example: ?timeout @user 1h spam"""
     if not ctx.author.guild_permissions.moderate_members:
         return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
     if not _can_punish_target(ctx.author, member):
@@ -3065,7 +3168,7 @@ async def timeout_cmd(ctx, member: discord.Member, duration: str, *, reason: str
 @_punishment_staff_check()
 @commands.bot_has_permissions(moderate_members=True)
 async def chatmute_cmd(ctx, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
-    """Chat mute (timeout). Example: !chatmute @user 30m toxic"""
+    """Chat mute (timeout). Example: ?chatmute @user 30m toxic"""
     if not ctx.author.guild_permissions.moderate_members:
         return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
     if not _can_punish_target(ctx.author, member):
@@ -3089,7 +3192,7 @@ async def chatmute_cmd(ctx, member: discord.Member, duration: str, *, reason: st
 @_punishment_staff_check()
 @commands.bot_has_permissions(moderate_members=True)
 async def voicemute_cmd(ctx, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
-    """Voice mute. Example: !voicemute @user 1h mic spam"""
+    """Voice mute. Example: ?voicemute @user 1h mic spam"""
     if not ctx.author.guild_permissions.moderate_members:
         return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
     if not _can_punish_target(ctx.author, member):
@@ -3115,7 +3218,7 @@ async def voicemute_cmd(ctx, member: discord.Member, duration: str, *, reason: s
 @_punishment_staff_check()
 @commands.bot_has_permissions(moderate_members=True)
 async def untimeout_cmd(ctx, member: discord.Member, *, reason: str = "Chat mute removed"):
-    """Remove chat mute (timeout + chat mute role). Example: !untimeout @user"""
+    """Remove chat mute (timeout + chat mute role). Example: ?untimeout @user"""
     if not ctx.author.guild_permissions.moderate_members:
         return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
     if not _can_punish_target(ctx.author, member):
@@ -3142,7 +3245,7 @@ async def untimeout_cmd(ctx, member: discord.Member, *, reason: str = "Chat mute
 @_punishment_staff_check()
 @commands.bot_has_permissions(moderate_members=True)
 async def unmute_cmd(ctx, member: discord.Member, *, reason: str = "Voice mute removed"):
-    """Remove voice mute (server mute + voice mute role). Example: !unmute @user"""
+    """Remove voice mute (server mute + voice mute role). Example: ?unmute @user"""
     if not ctx.author.guild_permissions.moderate_members:
         return await ctx.send("You need **Moderate Members** permission.", delete_after=8)
     if not _can_punish_target(ctx.author, member):
@@ -3168,7 +3271,7 @@ async def unmute_cmd(ctx, member: discord.Member, *, reason: str = "Voice mute r
 @bot.command(name="warn", aliases=["warning"])
 @_punishment_staff_check()
 async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason provided"):
-    """Warn a member. Example: !warn @user toxic behavior"""
+    """Warn a member. Example: ?warn @user toxic behavior"""
     if not _can_punish_target(ctx.author, member):
         return await ctx.send("You cannot punish this member.", delete_after=8)
 
@@ -3216,7 +3319,7 @@ async def warn_cmd(ctx, member: discord.Member, *, reason: str = "No reason prov
 @bot.command(name="warnings", aliases=["warns", "getwarns"])
 @_punishment_staff_check()
 async def warnings_cmd(ctx, member: discord.Member = None):
-    """Check how many warnings a member has. Example: !warnings @user"""
+    """Check how many warnings a member has. Example: ?warnings @user"""
     target = member or ctx.author
     count = _get_warning_count(target.id)
     await ctx.send(
@@ -3234,8 +3337,8 @@ async def warnings_cmd(ctx, member: discord.Member = None):
 async def clearwarn_cmd(ctx, member: discord.Member, amount: str = "all"):
     """
     Remove warning(s) from a member and sync warn roles/mutes.
-    !clearwarn @user       → remove all warnings
-    !clearwarn @user 1     → remove one warning
+    ?clearwarn @user       → remove all warnings
+    ?clearwarn @user 1     → remove one warning
     """
     if member.bot:
         return await ctx.send("Bots cannot have warnings.", delete_after=8)
@@ -3253,7 +3356,7 @@ async def clearwarn_cmd(ctx, member: discord.Member, amount: str = "all"):
         try:
             remove_count = int(token)
         except ValueError:
-            return await ctx.send("Usage: `!clearwarn @user` or `!clearwarn @user 1`", delete_after=10)
+            return await ctx.send(f"Usage: `{COMMAND_PREFIX}clearwarn @user` or `{COMMAND_PREFIX}clearwarn @user 1`", delete_after=10)
         if remove_count <= 0:
             return await ctx.send("Amount must be at least 1.", delete_after=8)
         for _ in range(min(remove_count, current)):
@@ -3355,10 +3458,19 @@ async def on_member_join(member):
     if not welcome_channel:
         return
 
+    if not _should_post_welcome():
+        print(f"Welcome card skipped for {member.id} (cap {WELCOME_POST_CAP}/min).")
+        try:
+            await welcome_channel.send(
+                content=f"Welcome {member.mention}! The glamorous combatant has landed in **{guild.name}**!"
+            )
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                print("Welcome fallback message skipped (rate limited).")
+        return
+
     try:
         buffer = await build_welcome_card(member)
-        image_file = discord.File(buffer, filename="welcome_card.png")
-
         embed_welcome = discord.Embed(
             title="GLORIOUS ARRIVAL!",
             description=(
@@ -3373,7 +3485,15 @@ async def on_member_join(member):
         embed_welcome.set_image(url="attachment://welcome_card.png")
 
         content_msg = f"Welcome {member.mention}! The glamorous combatant has landed in **{guild.name}**!"
-        await welcome_channel.send(content=content_msg, file=image_file, embed=embed_welcome)
+        card_data = buffer.getvalue()
+        await _api_call_with_retry(
+            lambda: welcome_channel.send(
+                content=content_msg,
+                file=discord.File(io.BytesIO(card_data), filename="welcome_card.png"),
+                embed=embed_welcome,
+            ),
+            label="Welcome card post",
+        )
 
     except Exception as e:
         print(f"Error generating welcome image: {e}")
