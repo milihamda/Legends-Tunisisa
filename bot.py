@@ -1,7 +1,6 @@
 import asyncio
 import io
 import json
-import math
 import os
 import random
 import re
@@ -17,7 +16,6 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from welcome_card import build_welcome_card, AVATAR_SIZE, AVATAR_POSITION, FONT_SIZE
-from level_up_card import build_level_up_card
 from punishment_card import LABELS as PUNISHMENT_LABELS, build_punishment_card
 
 load_dotenv()
@@ -107,17 +105,13 @@ TICKET_CATEGORIES = {
 TICKET_PANEL_TITLE = "🎫 Support Tickets"
 TICKET_TOPIC_PREFIX = "legends-ticket:"
 
-LEVEL_LOG_CHANNEL_ID = 1517921554510385242
 PUNISHMENT_LOG_CHANNEL_ID = 1522676265381793876
 
-DATA_BACKUP_CHANNEL_ID = 1518023858765168771
 BOT_VOICE_CHANNEL_ID = 1518025649225470072
 BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"))
 BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "welcome to Bot-Chat")
-BOT_BUILD_ID = "2026-07-08-all-in-one"
+BOT_BUILD_ID = "2026-07-08-main-split"
 
-DISCORD_BACKUP_INTERVAL_MINUTES = max(5, int(os.getenv("DISCORD_BACKUP_INTERVAL_MINUTES", "30")))
-LEVEL_UP_ANNOUNCE_CAP = max(1, int(os.getenv("LEVEL_UP_ANNOUNCE_CAP", "5")))
 BOT_CHAT_KEEPALIVE_MINUTES = max(5.0, float(os.getenv("BOT_CHAT_KEEPALIVE_MINUTES", "15")))
 
 # Server default: chat/voice-text notifications only on @mentions (not every message)
@@ -125,132 +119,11 @@ SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS = os.getenv(
     "SET_DEFAULT_NOTIFICATIONS_ONLY_MENTIONS", "true"
 ).lower() in ("1", "true", "yes")
 
-ROLE_LVL_10 = 1518012453001232526
-ROLE_LVL_20 = 1518012596824047677
-ROLE_LVL_30 = 1518012707553546421
-ROLE_LVL_40 = 1518012815116468284
-ROLE_LVL_50 = 1518012943940325406
-ROLE_LVL_60 = 1518805640594850002
-ROLE_LVL_70 = 1518805913530535987
-ROLE_LVL_80 = 1518806076009746543
-ROLE_LVL_90 = 1518806185896185936
-ROLE_LVL_100 = 1518806344373637271
-ROLE_LVL_200 = 1523427665913319574
-
-LEVEL_ROLE_TIERS = (
-    (10, ROLE_LVL_10),
-    (20, ROLE_LVL_20),
-    (30, ROLE_LVL_30),
-    (40, ROLE_LVL_40),
-    (50, ROLE_LVL_50),
-    (60, ROLE_LVL_60),
-    (70, ROLE_LVL_70),
-    (80, ROLE_LVL_80),
-    (90, ROLE_LVL_90),
-    (100, ROLE_LVL_100),
-    (200, ROLE_LVL_200),
-)
-LEVEL_ROLE_IDS = tuple(role_id for _, role_id in LEVEL_ROLE_TIERS)
-
-# Voice leveling: Lv1 = 5 min, Lv2 = +10 min (15 total), Lv3 = +15 min (30 total), ...
-LEVEL_MINUTES_BASE = 5
-MAX_VOICE_LEVEL = 1000
-
-
-def voice_minutes_for_level(level: int) -> int:
-    """Total voice minutes required to reach `level`."""
-    return LEVEL_MINUTES_BASE * level * (level + 1) // 2
-
-
-def level_from_voice_minutes(minutes: int) -> int:
-    """Highest level reachable with `minutes` of voice time."""
-    if minutes <= 0:
-        return 0
-    level = int((-1 + math.sqrt(1 + 8 * minutes / LEVEL_MINUTES_BASE)) // 2)
-    return min(level, MAX_VOICE_LEVEL)
-
-
-def minutes_for_next_level(current_level: int) -> int:
-    """Minutes needed to go from `current_level` to the next level."""
-    return LEVEL_MINUTES_BASE * (current_level + 1)
-
-
-def _level_role_id_for_level(level: int) -> int | None:
-    if level < LEVEL_ROLE_TIERS[0][0]:
-        return None
-    role_id = None
-    for threshold, rid in LEVEL_ROLE_TIERS:
-        if level >= threshold:
-            role_id = rid
-    return role_id
-
-
-async def _sync_level_voice_roles(member: discord.Member, level: int) -> None:
-    guild = member.guild
-    target_role_id = _level_role_id_for_level(level)
-    to_remove = [
-        role
-        for role_id in LEVEL_ROLE_IDS
-        if role_id != target_role_id and (role := guild.get_role(role_id)) and role in member.roles
-    ]
-    if to_remove:
-        await member.remove_roles(*to_remove, reason=f"Voice level role sync (Lv {level})")
-    if target_role_id:
-        target_role = guild.get_role(target_role_id)
-        if target_role and target_role not in member.roles:
-            await member.add_roles(target_role, reason=f"Reached voice level {level}")
-
-
-def _normalize_user_level_data(raw: dict) -> dict:
-    if "voice_minutes" in raw:
-        minutes = int(raw["voice_minutes"])
-    else:
-        minutes = int(raw.get("xp", 0)) // 10
-    return {
-        "voice_minutes": minutes,
-        "level": level_from_voice_minutes(minutes),
-    }
-
-
-def _get_user_level_data(user_id: int) -> dict:
-    return _normalize_user_level_data(user_levels.get(user_id, {}))
-
-
-def _iter_level_voice_channels(guild: discord.Guild):
-    """Voice + stage channels where voice time can count."""
-    excluded = {
-        CREATE_CHANNEL_ID,
-        SUPPORT_CHANNEL_ID,
-        VERIFICATION_1_ID,
-        VERIFICATION_2_ID,
-        BOT_VOICE_CHANNEL_ID,
-    }
-    for channel in (*guild.voice_channels, *guild.stage_channels):
-        if channel.id in excluded or not channel.members:
-            continue
-        yield channel
-
-
 def _start_background_tasks():
-    if not update_levels_task.is_running():
-        update_levels_task.start()
-    if not discord_backup_task.is_running():
-        discord_backup_task.start()
     if not bot_chat_keepalive_task.is_running():
         bot_chat_keepalive_task.start()
     if not empty_temp_rooms_cleanup_task.is_running():
         empty_temp_rooms_cleanup_task.start()
-
-
-def _format_level_stats(user_data: dict) -> str:
-    level = user_data["level"]
-    minutes = user_data["voice_minutes"]
-    remaining = max(0, voice_minutes_for_level(level + 1) - minutes)
-    return (
-        f"• **Current Level:** `Level {level}`\n"
-        f"• **Voice Time:** `{minutes} min`\n"
-        f"• **Next Level:** `{remaining} min` remaining"
-    )
 
 
 intents = discord.Intents.default()
@@ -270,21 +143,14 @@ room_nsfw_retry_tasks: dict[int, asyncio.Task] = {}
 owner_transfer_tasks = {}
 OWNER_ABSENCE_SECONDS = 60
 locked_rooms = set()
-user_levels = {}
 DATA_DIR = Path("data")
-DB_FILE = str(DATA_DIR / "levels_database.json")
-LEGACY_DB_FILE = "levels_database.json"
 bot_chat_messages = {}
 ticket_counters: dict[int, int] = {}
 open_tickets_by_user: dict[int, int] = {}
 ticket_channels: dict[int, dict] = {}
 WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
-BACKUP_STATE_FILE = str(DATA_DIR / "backup_state.json")
 user_warnings: dict[int, int] = {}
 MAX_WARNS_BEFORE_BAN = 3
-_discord_backup_message_id: int | None = None
-_level_up_announce_count = 0
-_level_up_announce_bucket = 0
 
 WARN_1_ROLE_ID = 1523000242491097208
 WARN_2_ROLE_ID = 1523000417758347274
@@ -1705,217 +1571,6 @@ class DummyVoiceClient(discord.VoiceProtocol):
         pass
 
 
-def _levels_data_score(data: dict) -> int:
-    return sum(entry.get("voice_minutes", 0) for entry in data.values())
-
-
-def _normalize_levels_payload(raw: dict) -> dict:
-    return {int(k): _normalize_user_level_data(v) for k, v in raw.items()}
-
-
-def _read_levels_file(path: str) -> dict:
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return _normalize_levels_payload(json.load(f))
-    except Exception as e:
-        print(f"Could not read {path}: {e}")
-        return {}
-
-
-def _migrate_legacy_db_if_needed():
-    legacy = Path(LEGACY_DB_FILE)
-    target = Path(DB_FILE)
-    if legacy.is_file() and not target.exists():
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        legacy.replace(target)
-        print(f"Migrated {LEGACY_DB_FILE} -> {DB_FILE}")
-
-
-def _save_local_database_sync() -> bool:
-    if not user_levels:
-        return False
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        formatted_data = {str(k): v for k, v in user_levels.items()}
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(formatted_data, f, ensure_ascii=False, indent=4)
-        return True
-    except Exception as e:
-        print(f"Local level save failed: {e}")
-        return False
-
-
-def _load_backup_state() -> None:
-    global _discord_backup_message_id
-    path = Path(BACKUP_STATE_FILE)
-    if not path.is_file():
-        _discord_backup_message_id = None
-        return
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        message_id = int(data.get("message_id", 0) or 0)
-        _discord_backup_message_id = message_id or None
-    except Exception as e:
-        print(f"Could not load backup state: {e}")
-        _discord_backup_message_id = None
-
-
-def _save_backup_state(message_id: int | None) -> None:
-    global _discord_backup_message_id
-    _discord_backup_message_id = message_id
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with open(BACKUP_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                {"message_id": message_id, "channel_id": DATA_BACKUP_CHANNEL_ID},
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
-    except Exception as e:
-        print(f"Could not save backup state: {e}")
-
-
-def _should_announce_level_up() -> bool:
-    """Cap level-up announcements to avoid flooding Discord when many users level at once."""
-    global _level_up_announce_count, _level_up_announce_bucket
-    bucket = int(time.time() // 60)
-    if bucket != _level_up_announce_bucket:
-        _level_up_announce_bucket = bucket
-        _level_up_announce_count = 0
-    if _level_up_announce_count >= LEVEL_UP_ANNOUNCE_CAP:
-        return False
-    _level_up_announce_count += 1
-    return True
-
-
-async def _await_rate_limit(exc: discord.HTTPException, *, label: str) -> None:
-    wait = float(getattr(exc, "retry_after", 5) or 5) + 0.5
-    print(f"{label}: rate limited, waiting {wait:.1f}s")
-    await asyncio.sleep(wait)
-
-
-def _pick_best_levels_data(*datasets: dict) -> dict:
-    best: dict = {}
-    best_score = -1
-    for data in datasets:
-        if not data:
-            continue
-        score = _levels_data_score(data)
-        if score > best_score:
-            best = data
-            best_score = score
-    return best
-
-
-async def _read_levels_from_discord_backup() -> dict:
-    channel = bot.get_channel(DATA_BACKUP_CHANNEL_ID)
-    if not channel:
-        return {}
-
-    try:
-        async for message in channel.history(limit=10):
-            if message.author != bot.user:
-                continue
-
-            for attachment in message.attachments:
-                if not attachment.filename.lower().endswith(".json"):
-                    continue
-                try:
-                    payload = await attachment.read()
-                    return _normalize_levels_payload(json.loads(payload.decode("utf-8")))
-                except Exception as e:
-                    print(f"Error reading backup attachment {attachment.filename}: {e}")
-
-            if message.content.startswith("```json"):
-                clean_content = message.content.strip("```json").strip("```")
-                return _normalize_levels_payload(json.loads(clean_content))
-    except Exception as e:
-        print(f"Error loading cloud db: {e}")
-    return {}
-
-
-async def load_database_from_discord():
-    global user_levels
-    await bot.wait_until_ready()
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _migrate_legacy_db_if_needed()
-
-    local_data = _read_levels_file(DB_FILE)
-    discord_data = await _read_levels_from_discord_backup()
-    user_levels = _pick_best_levels_data(local_data, discord_data)
-
-    if user_levels:
-        _save_local_database_sync()
-        source = "local file" if _levels_data_score(local_data) >= _levels_data_score(discord_data) else "Discord backup"
-        print(f"Loaded {len(user_levels)} user levels from {source}.")
-    else:
-        print("No level data found — starting fresh.")
-
-
-async def save_database_to_discord() -> bool:
-    """Upload levels backup to Discord. Runs on a schedule — not every level tick."""
-    if not user_levels:
-        return False
-    if not _save_local_database_sync():
-        return False
-
-    channel = bot.get_channel(DATA_BACKUP_CHANNEL_ID)
-    if not channel:
-        return False
-
-    formatted_data = {str(k): v for k, v in user_levels.items()}
-    json_bytes = json.dumps(formatted_data, ensure_ascii=False, indent=2).encode("utf-8")
-    backup_embed = discord.Embed(
-        title="AUTOMATIC DATA BACKUP SECURED",
-        description=(
-            "Automated backup for server voice levels.\n"
-            "**DO NOT DELETE THIS MESSAGE.**\n"
-            f"Users tracked: `{len(user_levels)}` • Attachment: `levels_database.json`"
-        ),
-        color=discord.Color.green(),
-    )
-
-    if _discord_backup_message_id:
-        try:
-            old = await channel.fetch_message(_discord_backup_message_id)
-            await old.delete()
-        except discord.NotFound:
-            _save_backup_state(None)
-        except discord.HTTPException as exc:
-            if exc.status == 429:
-                await _await_rate_limit(exc, label="Cloud backup delete")
-                try:
-                    old = await channel.fetch_message(_discord_backup_message_id)
-                    await old.delete()
-                except Exception as delete_exc:
-                    print(f"Could not delete old backup after retry: {delete_exc}")
-            else:
-                print(f"Could not delete old backup message: {exc}")
-
-    for attempt in range(3):
-        try:
-            backup_file = discord.File(io.BytesIO(json_bytes), filename="levels_database.json")
-            backup_message = await channel.send(embed=backup_embed, file=backup_file)
-            _save_backup_state(backup_message.id)
-            print(f"Cloud backup saved ({len(user_levels)} users).")
-            return True
-        except discord.HTTPException as exc:
-            if exc.status == 429 and attempt < 2:
-                await _await_rate_limit(exc, label="Cloud backup send")
-                continue
-            print(f"Cloud backup failed: {exc}")
-            return False
-        except Exception as e:
-            print(f"Cloud backup failed: {e}")
-            return False
-    return False
-
-
 def _load_warnings() -> None:
     global user_warnings
     if not os.path.exists(WARNINGS_FILE):
@@ -2406,14 +2061,11 @@ class ControlPanelView(discord.ui.View):
         )
 
     async def check_level_button(self, interaction: discord.Interaction):
-        user_data = _get_user_level_data(interaction.user.id)
-        embed_stats = discord.Embed(
-            title="YOUR LIVE STATS",
-            description=f"Hello {interaction.user.mention}!\n\n{_format_level_stats(user_data)}",
-            color=discord.Color.blue(),
+        await interaction.response.send_message(
+            "Voice levels are tracked by the **Levels Bot**.\n"
+            "Use `!level` or `!level @user` in any text channel.",
+            ephemeral=True,
         )
-        embed_stats.set_thumbnail(url=interaction.user.display_avatar.url)
-        await interaction.response.send_message(embed=embed_stats, ephemeral=True)
 
     async def nsfw_button(self, interaction: discord.Interaction):
         channel = self._get_channel(interaction)
@@ -2465,13 +2117,8 @@ async def on_ready():
 
     _startup_done = True
 
-    await load_database_from_discord()
     _load_warnings()
-    _load_backup_state()
-    print(
-        f"Rate-limit settings: cloud backup every {DISCORD_BACKUP_INTERVAL_MINUTES}m, "
-        f"level-up cap {LEVEL_UP_ANNOUNCE_CAP}/min, bot-chat keepalive {BOT_CHAT_KEEPALIVE_MINUTES}m"
-    )
+    print(f"Rate-limit settings: bot-chat keepalive {BOT_CHAT_KEEPALIVE_MINUTES}m")
 
     log_channel = await _get_punishment_log_channel()
     if log_channel is None:
@@ -2553,107 +2200,6 @@ async def before_empty_temp_rooms_cleanup_task():
     await bot.wait_until_ready()
 
 
-@tasks.loop(minutes=DISCORD_BACKUP_INTERVAL_MINUTES)
-async def discord_backup_task():
-    try:
-        await save_database_to_discord()
-    except Exception as e:
-        print(f"Scheduled cloud backup failed: {e}")
-
-
-@discord_backup_task.before_loop
-async def before_discord_backup_task():
-    await bot.wait_until_ready()
-
-
-@tasks.loop(minutes=1.0)
-async def update_levels_task():
-    data_changed = False
-    for guild in bot.guilds:
-        log_channel = guild.get_channel(LEVEL_LOG_CHANNEL_ID)
-        for voice_channel in _iter_level_voice_channels(guild):
-            for member in voice_channel.members:
-                if member.bot:
-                    continue
-                voice = member.voice
-                if voice is None or voice.self_deaf:
-                    continue
-
-                try:
-                    user_id = member.id
-                    user_data = _get_user_level_data(user_id)
-                    old_lvl = user_data["level"]
-                    user_data["voice_minutes"] += 1
-                    new_calculated_level = level_from_voice_minutes(user_data["voice_minutes"])
-                    user_data["level"] = new_calculated_level
-                    user_levels[user_id] = user_data
-                    data_changed = True
-
-                    if new_calculated_level > old_lvl:
-                        current_lvl = new_calculated_level
-
-                        if log_channel and _should_announce_level_up():
-                            try:
-                                buffer = await build_level_up_card(member, old_lvl, current_lvl)
-                                image_file = discord.File(buffer, filename="level_up.png")
-                                embed_lvl = discord.Embed(
-                                    title="LEVEL UP!",
-                                    description=(
-                                        f"{member.mention} reached **Level {current_lvl}**.\n"
-                                        f"*Voice Time: {user_data['voice_minutes']} min*"
-                                    ),
-                                    color=discord.Color.from_rgb(231, 76, 60),
-                                )
-                                embed_lvl.set_image(url="attachment://level_up.png")
-                                await log_channel.send(file=image_file, embed=embed_lvl)
-                            except discord.HTTPException as exc:
-                                if exc.status == 429:
-                                    print(f"Level up card rate limited for {member.id}")
-                                else:
-                                    print(f"Level up card failed: {exc}")
-                                    try:
-                                        embed_lvl = discord.Embed(
-                                            title="LEVEL UP!",
-                                            description=(
-                                                f"{member.mention} reached **Level {current_lvl}**.\n"
-                                                f"*Voice Time: {user_data['voice_minutes']} min*"
-                                            ),
-                                            color=discord.Color.gold(),
-                                        )
-                                        embed_lvl.set_thumbnail(url=member.display_avatar.url)
-                                        await log_channel.send(embed=embed_lvl)
-                                    except Exception as fallback_exc:
-                                        print(f"Level up fallback failed: {fallback_exc}")
-                            except Exception as e:
-                                print(f"Level up card failed: {e}")
-
-                        if _level_role_id_for_level(old_lvl) != _level_role_id_for_level(current_lvl):
-                            try:
-                                await _sync_level_voice_roles(member, current_lvl)
-                            except discord.Forbidden:
-                                print(f"Level role sync forbidden for {member.id} at Lv {current_lvl}")
-                            except discord.HTTPException as exc:
-                                if exc.status == 429:
-                                    print(f"Level role sync rate limited for {member.id}")
-                                else:
-                                    print(f"Level role sync failed for {member.id}: {exc.text}")
-                except Exception as e:
-                    print(f"Level update failed for {member.id}: {e}")
-
-    if data_changed:
-        _save_local_database_sync()
-
-
-@update_levels_task.before_loop
-async def before_update_levels_task():
-    await bot.wait_until_ready()
-
-
-@update_levels_task.error
-async def update_levels_task_error(error):
-    print(f"update_levels_task crashed: {error}")
-
-
 @bot.command(name="ping")
 async def ping_cmd(ctx):
     """Check if the bot is online and responding."""
@@ -2694,46 +2240,6 @@ async def check_ticket_category_cmd(ctx):
         await ctx.message.delete()
     except discord.Forbidden:
         pass
-
-
-@bot.command(name="level")
-async def check_user_level_cmd(ctx, member: discord.Member = None):
-    target_member = member or ctx.author
-    if target_member.bot:
-        return await ctx.send("Bots do not have voice leveling profiles.")
-
-    user_data = _get_user_level_data(target_member.id)
-
-    embed_cmd = discord.Embed(
-        title="ARENA LEVEL REGISTRY",
-        description=f"Stats for: {target_member.mention}\n\n{_format_level_stats(user_data)}",
-        color=discord.Color.from_rgb(46, 204, 113),
-    )
-    embed_cmd.set_thumbnail(url=target_member.display_avatar.url)
-    embed_cmd.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
-    await ctx.send(embed=embed_cmd)
-
-
-@bot.command(name="testlevelup")
-async def test_levelup_cmd(ctx, member: discord.Member = None, old: int = None, new: int = None):
-    """Preview level-up card (admin). Example: !testlevelup @user 2 3"""
-    target = member or ctx.author
-    user_data = _get_user_level_data(target.id)
-    old_lvl = old if old is not None else max(0, user_data["level"] - 1)
-    new_lvl = new if new is not None else user_data["level"]
-
-    try:
-        buffer = await build_level_up_card(target, old_lvl, new_lvl)
-        image_file = discord.File(buffer, filename="level_up.png")
-        embed = discord.Embed(
-            title="LEVEL UP! (TEST)",
-            description=f"Preview: **{old_lvl} → {new_lvl}** for {target.mention}",
-            color=discord.Color.from_rgb(231, 76, 60),
-        )
-        embed.set_image(url="attachment://level_up.png")
-        await ctx.send(file=image_file, embed=embed)
-    except Exception as e:
-        await ctx.send(f"Level up preview failed: {e}")
 
 
 @bot.command(name="testwelcome")
@@ -3991,17 +3497,14 @@ def _start_health_server() -> None:
 _original_bot_close = bot.close
 
 
-async def _close_with_level_save():
-    if user_levels:
-        if _save_local_database_sync():
-            print("Levels saved locally before shutdown.")
+async def _close_with_save():
     if user_warnings:
         if _save_warnings():
             print("Warnings saved locally before shutdown.")
     await _original_bot_close()
 
 
-bot.close = _close_with_level_save
+bot.close = _close_with_save
 
 def _login_retry_wait(attempt: int) -> int:
     """Seconds to wait before retrying login after a global 429."""
