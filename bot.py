@@ -20,16 +20,27 @@ from punishment_card import LABELS as PUNISHMENT_LABELS, build_punishment_card
 
 load_dotenv()
 
+
+def _env_channel_id(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw or raw.lower() in ("0", "none", "false"):
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid {name}={raw!r} — must be a numeric Discord channel ID.") from exc
+
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise SystemExit("Missing DISCORD_TOKEN. Copy .env.example to .env and add your bot token.")
 
-CREATE_CHANNEL_ID = 1517870390968582155
+CREATE_CHANNEL_ID = _env_channel_id("CREATE_CHANNEL_ID", 1517870390968582155)
 
-SUPPORT_CHANNEL_ID = 1518020513174130769
+SUPPORT_CHANNEL_ID = _env_channel_id("SUPPORT_CHANNEL_ID", 1518020513174130769)
 
-VERIFICATION_1_ID = 1517597478378143937
-VERIFICATION_2_ID = 1517666468593143940
+VERIFICATION_1_ID = _env_channel_id("VERIFICATION_1_ID", 1517597478378143937)
+VERIFICATION_2_ID = _env_channel_id("VERIFICATION_2_ID", 1517666468593143940)
 STAFF_ROLE_ID = 1517586424306598140
 
 NOT_VERIFIED_ROLE_ID = 1517593118399139840
@@ -198,6 +209,7 @@ room_nsfw_retry_tasks: dict[int, asyncio.Task] = {}
 owner_transfer_tasks = {}
 OWNER_ABSENCE_SECONDS = 60
 locked_rooms = set()
+_join_create_in_progress: set[int] = set()
 DATA_DIR = Path("data")
 bot_chat_messages = {}
 ticket_counters: dict[int, int] = {}
@@ -258,51 +270,111 @@ def _list_guild_category_ids(guild: discord.Guild) -> str:
     return ", ".join(f"{cat.name}={cat.id}" for cat in guild.categories)
 
 
+def _log_join_to_create_startup(guild: discord.Guild) -> None:
+    labels = {
+        CREATE_CHANNEL_ID: "Create Lounge",
+        SUPPORT_CHANNEL_ID: "Support",
+        VERIFICATION_1_ID: "Verification 1",
+        VERIFICATION_2_ID: "Verification 2",
+    }
+    for hub_id, label in labels.items():
+        channel = guild.get_channel(hub_id)
+        if isinstance(channel, discord.VoiceChannel):
+            cat = channel.category.name if channel.category else "NO CATEGORY"
+            print(f"Join-to-create hub OK: {label} → {channel.name} ({hub_id}) category={cat}")
+        elif channel is None:
+            print(
+                f"WARNING: Join-to-create hub MISSING: {label} channel id {hub_id} "
+                f"not found in {guild.name}. Set CREATE_CHANNEL_ID (etc.) in env if the channel was recreated."
+            )
+        else:
+            print(f"WARNING: Join-to-create hub {label} ({hub_id}) is not a voice channel.")
+
+
+async def _notify_join_create_failure(member: discord.Member, message: str) -> None:
+    try:
+        await member.send(
+            embed=discord.Embed(
+                title="Could not create your voice room",
+                description=message,
+                color=discord.Color.red(),
+            )
+        )
+    except discord.Forbidden:
+        pass
+
+
 async def _create_join_to_create_room(member, trigger_channel):
     """Create a private sub-room when a member joins a join-to-create voice channel."""
+    if member.bot or member.id in _join_create_in_progress:
+        return
+
     config = JOIN_TO_CREATE_CHANNELS.get(trigger_channel.id)
     if not config:
         return
 
     guild = member.guild
-    category = trigger_channel.category
-    everyone_role = guild.default_role
-    staff_role = guild.get_role(STAFF_ROLE_ID)
-    boy_role = guild.get_role(BOY_ROLE_ID)
-    girl_role = guild.get_role(GIRL_ROLE_ID)
+    me = guild.me
+    if me is None:
+        print(f"Join-to-create skipped for {member}: bot member not cached in guild.")
+        return
 
-    overwrites = {
-        everyone_role: discord.PermissionOverwrite(view_channel=False, connect=False, send_messages=False),
-    }
+    missing_perms = [
+        name
+        for name, allowed in (
+            ("Manage Channels", me.guild_permissions.manage_channels),
+            ("Move Members", me.guild_permissions.move_members),
+            ("Connect", me.guild_permissions.connect),
+        )
+        if not allowed
+    ]
+    if missing_perms:
+        msg = (
+            f"I need **{'**, **'.join(missing_perms)}** on this server to create your room.\n"
+            "Ask staff to fix the bot role permissions and try again."
+        )
+        print(f"Join-to-create blocked for {member} in {trigger_channel.name}: missing {missing_perms}")
+        await _notify_join_create_failure(member, msg)
+        return
 
-    if config["kind"] == "lounge":
-        if boy_role:
-            overwrites[boy_role] = discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True, send_messages=True
+    _join_create_in_progress.add(member.id)
+    try:
+        category = trigger_channel.category
+        everyone_role = guild.default_role
+        staff_role = guild.get_role(STAFF_ROLE_ID)
+        boy_role = guild.get_role(BOY_ROLE_ID)
+        girl_role = guild.get_role(GIRL_ROLE_ID)
+
+        overwrites = {
+            everyone_role: discord.PermissionOverwrite(view_channel=False, connect=False, send_messages=False),
+        }
+
+        if config["kind"] == "lounge":
+            if boy_role:
+                overwrites[boy_role] = discord.PermissionOverwrite(
+                    view_channel=True, connect=True, speak=True, send_messages=True
+                )
+            if girl_role:
+                overwrites[girl_role] = discord.PermissionOverwrite(
+                    view_channel=True, connect=True, speak=True, send_messages=True
+                )
+        elif config["kind"] in ("support", "verification") and staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                speak=True,
+                send_messages=True,
+                move_members=True,
             )
-        if girl_role:
-            overwrites[girl_role] = discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True, send_messages=True
-            )
-    elif config["kind"] in ("support", "verification") and staff_role:
-        overwrites[staff_role] = discord.PermissionOverwrite(
+
+        overwrites[member] = discord.PermissionOverwrite(
             view_channel=True,
             connect=True,
             speak=True,
             send_messages=True,
-            move_members=True,
+            manage_channels=True,
         )
 
-    overwrites[member] = discord.PermissionOverwrite(
-        view_channel=True,
-        connect=True,
-        speak=True,
-        send_messages=True,
-        manage_channels=True,
-    )
-
-    me = guild.me
-    if me:
         overwrites[me] = discord.PermissionOverwrite(
             view_channel=True,
             connect=True,
@@ -311,25 +383,62 @@ async def _create_join_to_create_room(member, trigger_channel):
             read_message_history=True,
         )
 
-    if config["kind"] == "lounge":
-        channel_name = format_lounge_room_name(member.name)
-    else:
-        channel_name = config["name"].format(member=member.name)
+        if config["kind"] == "lounge":
+            channel_name = format_lounge_room_name(member.name)
+        else:
+            channel_name = config["name"].format(member=member.name)
 
-    new_channel = await guild.create_voice_channel(
-        name=channel_name[:100],
-        category=category,
-        overwrites=overwrites,
-        reason=f"Temp {config['kind']} room for {member}",
-    )
-    cat_name = getattr(category, "name", "none") if category else "none"
-    print(f"Temp room created: {new_channel.name} → category {cat_name}")
-    owners[new_channel.id] = member.id
-    room_kinds[new_channel.id] = config["kind"]
-    room_nsfw_enabled[new_channel.id] = False
-    await member.move_to(new_channel)
+        new_channel = await guild.create_voice_channel(
+            name=channel_name[:100],
+            category=category,
+            overwrites=overwrites,
+            reason=f"Temp {config['kind']} room for {member}",
+        )
+        cat_name = getattr(category, "name", "none") if category else "none"
+        print(
+            f"Temp room created: {new_channel.name} ({new_channel.id}) "
+            f"for {member} via hub {trigger_channel.name} ({trigger_channel.id}) → category {cat_name}"
+        )
+        owners[new_channel.id] = member.id
+        room_kinds[new_channel.id] = config["kind"]
+        room_nsfw_enabled[new_channel.id] = False
 
-    await _send_room_control_panel(new_channel, member, kind=config["kind"])
+        try:
+            await member.move_to(new_channel)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"Join-to-create move failed for {member} → {new_channel.name}: {exc}")
+            await _notify_join_create_failure(
+                member,
+                (
+                    f"Your room **{new_channel.name}** was created, but I could not move you into it.\n"
+                    "Please join it manually from the voice channel list."
+                ),
+            )
+
+        await _send_room_control_panel(new_channel, member, kind=config["kind"])
+    except discord.Forbidden as exc:
+        print(f"Join-to-create forbidden for {member} in {trigger_channel.name}: {exc}")
+        await _notify_join_create_failure(
+            member,
+            (
+                "I do not have permission to create your room in this category.\n"
+                "Move the **bot role above** member roles and grant **Manage Channels** + **Move Members**."
+            ),
+        )
+    except discord.HTTPException as exc:
+        print(f"Join-to-create HTTP error for {member} in {trigger_channel.name}: {exc.status} {exc.text}")
+        await _notify_join_create_failure(
+            member,
+            f"Discord rejected the room creation (`HTTP {exc.status}`). Try again in a moment.",
+        )
+    except Exception as exc:
+        print(f"Join-to-create unexpected error for {member} in {trigger_channel.name}: {exc}")
+        await _notify_join_create_failure(
+            member,
+            "Something went wrong while creating your room. Staff have been notified in the bot logs.",
+        )
+    finally:
+        _join_create_in_progress.discard(member.id)
 
 
 async def _set_room_locked(channel, *, locked: bool):
@@ -2216,6 +2325,7 @@ async def on_ready():
 
     for guild in bot.guilds:
         try:
+            _log_join_to_create_startup(guild)
             await _cleanup_and_register_temp_rooms(guild)
             if GUILD_INIT_STEP_DELAY:
                 await asyncio.sleep(GUILD_INIT_STEP_DELAY)
@@ -2290,6 +2400,76 @@ async def ping_cmd(ctx):
         f"Pong — `{round(bot.latency * 1000)}ms` • build `{BOT_BUILD_ID}`",
         delete_after=10,
     )
+
+
+@bot.command(name="checkjoincreate")
+@commands.has_permissions(manage_guild=True)
+async def check_join_create_cmd(ctx):
+    """Verify join-to-create hub channels, bot permissions, and category setup."""
+    guild = ctx.guild
+    me = guild.me
+    lines = [f"**Build:** `{BOT_BUILD_ID}`"]
+
+    if me is None:
+        lines.append("**Bot member:** NOT FOUND in this guild.")
+    else:
+        perm_bits = (
+            ("Manage Channels", me.guild_permissions.manage_channels),
+            ("Move Members", me.guild_permissions.move_members),
+            ("Connect", me.guild_permissions.connect),
+            ("Send Messages", me.guild_permissions.send_messages),
+        )
+        perm_status = ", ".join(
+            f"{'✅' if ok else '❌'} {label}" for label, ok in perm_bits
+        )
+        lines.append(f"**Bot permissions:** {perm_status}")
+        if me.top_role:
+            lines.append(f"**Bot top role:** {me.top_role.name} (position {me.top_role.position})")
+
+    hub_labels = {
+        CREATE_CHANNEL_ID: "Create Lounge",
+        SUPPORT_CHANNEL_ID: "Support",
+        VERIFICATION_1_ID: "Verification 1",
+        VERIFICATION_2_ID: "Verification 2",
+    }
+    lines.append("**Configured hubs:**")
+    for hub_id, label in hub_labels.items():
+        channel = guild.get_channel(hub_id)
+        if isinstance(channel, discord.VoiceChannel):
+            cat = channel.category
+            cat_text = f"{cat.name} (`{cat.id}`)" if cat else "⚠️ **no category**"
+            lines.append(f"✅ **{label}** — {channel.mention} (`{channel.id}`) → {cat_text}")
+        elif channel is None:
+            lines.append(f"❌ **{label}** — channel `{hub_id}` **not found** (wrong ID or bot cannot see it)")
+        else:
+            lines.append(f"❌ **{label}** — `{hub_id}` exists but is **not a voice channel** ({type(channel).__name__})")
+
+    voice_hubs = [
+        ch for ch in guild.voice_channels
+        if ch.id not in _JOIN_TO_CREATE_HUB_IDS
+        and ch.category
+        and "create" in ch.name.lower()
+    ]
+    if voice_hubs:
+        hints = ", ".join(f"**{ch.name}** (`{ch.id}`)" for ch in voice_hubs[:5])
+        lines.append(
+            f"**Hint:** voice channels with “create” in the name that are **not** configured: {hints}"
+        )
+        lines.append(
+            "If users join one of those, update the ID in Render env / `.env` "
+            f"(`CREATE_CHANNEL_ID=...`) or run `{COMMAND_PREFIX}checkjoincreate` after fixing."
+        )
+
+    embed = discord.Embed(
+        title="Join-to-Create Check",
+        description="\n".join(lines),
+        color=discord.Color.green(),
+    )
+    await ctx.send(embed=embed, delete_after=60)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
 
 
 @bot.command(name="checkticketcategory")
@@ -3567,7 +3747,12 @@ async def on_voice_state_update(member, before, after):
                             except discord.Forbidden:
                                 pass
 
-    if after.channel and after.channel.id in JOIN_TO_CREATE_CHANNELS:
+    if (
+        after.channel
+        and after.channel.id in JOIN_TO_CREATE_CHANNELS
+        and not member.bot
+        and (before.channel is None or before.channel.id != after.channel.id)
+    ):
         await _create_join_to_create_room(member, after.channel)
 
     if after.channel and after.channel.id in owners and member.id == owners[after.channel.id]:
