@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import math
 import os
 import random
 import re
@@ -124,6 +125,10 @@ BOT_CHAT_CHANNEL_ID = int(os.getenv("BOT_CHAT_CHANNEL_ID", "1518023858765168771"
 BOT_CHAT_MESSAGE = os.getenv("BOT_CHAT_MESSAGE", "welcome to Bot-Chat")
 BOT_BUILD_ID = "2026-07-08-rate-limit-safe"
 
+LEVEL_LOG_CHANNEL_ID = 1517921554510385242
+LEVEL_MINUTES_BASE = 5
+MAX_VOICE_LEVEL = 1000
+
 BOT_CHAT_KEEPALIVE_MINUTES = max(5.0, float(os.getenv("BOT_CHAT_KEEPALIVE_MINUTES", "30")))
 EMPTY_ROOM_CLEANUP_MINUTES = max(5.0, float(os.getenv("EMPTY_ROOM_CLEANUP_MINUTES", "10")))
 PUNISHMENT_POST_CAP = max(1, int(os.getenv("PUNISHMENT_POST_CAP", "5")))
@@ -141,6 +146,8 @@ def _start_background_tasks():
         bot_chat_keepalive_task.start()
     if not empty_temp_rooms_cleanup_task.is_running():
         empty_temp_rooms_cleanup_task.start()
+    if not update_voice_levels_task.is_running():
+        update_voice_levels_task.start()
 
 
 intents = discord.Intents.default()
@@ -212,12 +219,15 @@ OWNER_ABSENCE_SECONDS = 60
 locked_rooms = set()
 _join_create_in_progress: set[int] = set()
 DATA_DIR = Path("data")
+LEVELS_DB_FILE = DATA_DIR / "levels_database.json"
+LEGACY_LEVELS_DB_FILE = Path("levels_database.json")
 bot_chat_messages = {}
 ticket_counters: dict[int, int] = {}
 open_tickets_by_user: dict[int, int] = {}
 ticket_channels: dict[int, dict] = {}
 WARNINGS_FILE = str(DATA_DIR / "warnings_database.json")
 user_warnings: dict[int, int] = {}
+user_levels: dict[int, dict] = {}
 MAX_WARNS_BEFORE_BAN = 3
 
 WARN_1_ROLE_ID = 1523000242491097208
@@ -1776,6 +1786,102 @@ def _save_warnings() -> bool:
         return False
 
 
+def _voice_minutes_for_level(level: int) -> int:
+    return LEVEL_MINUTES_BASE * level * (level + 1) // 2
+
+
+def _level_from_voice_minutes(minutes: int) -> int:
+    if minutes <= 0:
+        return 0
+    level = int((-1 + math.sqrt(1 + 8 * minutes / LEVEL_MINUTES_BASE)) // 2)
+    return min(level, MAX_VOICE_LEVEL)
+
+
+def _normalize_user_level_data(raw: dict) -> dict:
+    if "voice_minutes" in raw:
+        minutes = int(raw["voice_minutes"])
+    else:
+        minutes = int(raw.get("xp", 0)) // 10
+    return {
+        "voice_minutes": minutes,
+        "level": _level_from_voice_minutes(minutes),
+    }
+
+
+def _get_user_level_data(user_id: int) -> dict:
+    data = user_levels.get(user_id)
+    if not data:
+        return {"voice_minutes": 0, "level": 0}
+    return _normalize_user_level_data(data)
+
+
+def _minutes_until_next_level(minutes: int, level: int) -> int | None:
+    if level >= MAX_VOICE_LEVEL:
+        return None
+    return max(0, _voice_minutes_for_level(level + 1) - minutes)
+
+
+def _load_levels_database() -> None:
+    global user_levels
+    if LEGACY_LEVELS_DB_FILE.is_file() and not LEVELS_DB_FILE.exists():
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        LEGACY_LEVELS_DB_FILE.replace(LEVELS_DB_FILE)
+
+    if not LEVELS_DB_FILE.is_file():
+        user_levels = {}
+        return
+
+    try:
+        with open(LEVELS_DB_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        user_levels = {int(k): _normalize_user_level_data(v) for k, v in raw.items()}
+        print(f"Loaded {len(user_levels)} voice level records.")
+    except Exception as exc:
+        print(f"Could not load levels database: {exc}")
+        user_levels = {}
+
+
+def _save_levels_database() -> bool:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LEVELS_DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {str(k): _normalize_user_level_data(v) for k, v in user_levels.items()},
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        return True
+    except Exception as exc:
+        print(f"Levels save failed: {exc}")
+        return False
+
+
+def _format_level_embed(target: discord.Member) -> discord.Embed:
+    data = _get_user_level_data(target.id)
+    minutes = data["voice_minutes"]
+    level = data["level"]
+    remaining = _minutes_until_next_level(minutes, level)
+    if remaining is None:
+        progress = "Max level reached."
+    else:
+        progress = f"**{remaining}** min until level **{level + 1}**."
+
+    hours = minutes // 60
+    mins = minutes % 60
+    time_text = f"{hours}h {mins}m" if hours else f"{mins}m"
+
+    return discord.Embed(
+        title=f"Voice Level — {target.display_name}",
+        description=(
+            f"**Level:** `{level}`\n"
+            f"**Voice time:** `{time_text}` (`{minutes}` min)\n"
+            f"{progress}"
+        ),
+        color=discord.Color.gold(),
+    )
+
+
 def _get_warning_count(user_id: int) -> int:
     return user_warnings.get(user_id, 0)
 
@@ -2240,11 +2346,8 @@ class ControlPanelView(discord.ui.View):
         )
 
     async def check_level_button(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "Voice levels are tracked by the **Levels Bot**.\n"
-            f"Use `{COMMAND_PREFIX}level` or `{COMMAND_PREFIX}level @user` in any text channel.",
-            ephemeral=True,
-        )
+        embed = _format_level_embed(interaction.user)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def nsfw_button(self, interaction: discord.Interaction):
         channel = self._get_channel(interaction)
@@ -2299,6 +2402,7 @@ async def on_ready():
     _startup_done = True
 
     _load_warnings()
+    _load_levels_database()
     print(
         f"Rate-limit settings: bot-chat keepalive {BOT_CHAT_KEEPALIVE_MINUTES}m, "
         f"room cleanup {EMPTY_ROOM_CLEANUP_MINUTES}m, "
@@ -2386,6 +2490,43 @@ async def empty_temp_rooms_cleanup_task():
             print(f"Empty temp room cleanup failed for {guild.name}: {e}")
 
 
+@tasks.loop(minutes=1.0)
+async def update_voice_levels_task():
+    changed = False
+    level_ups: list[tuple[discord.Guild, discord.Member, int, int]] = []
+    skip_ids = _JOIN_TO_CREATE_HUB_IDS | {BOT_VOICE_CHANNEL_ID}
+
+    for guild in bot.guilds:
+        for vc in guild.voice_channels:
+            if vc.id in skip_ids or not vc.members:
+                continue
+            for member in vc.members:
+                if member.bot or not member.voice or member.voice.self_deaf:
+                    continue
+                entry = _normalize_user_level_data(user_levels.get(member.id, {}))
+                old_level = entry["level"]
+                entry["voice_minutes"] += 1
+                entry["level"] = _level_from_voice_minutes(entry["voice_minutes"])
+                user_levels[member.id] = entry
+                changed = True
+                if entry["level"] > old_level:
+                    level_ups.append((guild, member, old_level, entry["level"]))
+
+    if changed:
+        _save_levels_database()
+
+    for guild, member, old_level, new_level in level_ups:
+        log_channel = guild.get_channel(LEVEL_LOG_CHANNEL_ID)
+        if not log_channel:
+            continue
+        try:
+            await log_channel.send(
+                f"🎉 {member.mention} reached **Level {new_level}**! (was {old_level})"
+            )
+        except discord.HTTPException as exc:
+            print(f"Level-up announce failed for {member.id}: {exc.text}")
+
+
 @bot_chat_keepalive_task.before_loop
 async def before_bot_chat_keepalive_task():
     await bot.wait_until_ready()
@@ -2396,6 +2537,11 @@ async def before_empty_temp_rooms_cleanup_task():
     await bot.wait_until_ready()
 
 
+@update_voice_levels_task.before_loop
+async def before_update_voice_levels_task():
+    await bot.wait_until_ready()
+
+
 @bot.command(name="ping")
 async def ping_cmd(ctx):
     """Check if the bot is online and responding."""
@@ -2403,6 +2549,16 @@ async def ping_cmd(ctx):
         f"Pong — `{round(bot.latency * 1000)}ms` • build `{BOT_BUILD_ID}`",
         delete_after=10,
     )
+
+
+@bot.command(name="level", aliases=["lvl", "niveau"])
+async def level_cmd(ctx, member: discord.Member = None):
+    """Show voice level stats. Usage: ?level or ?level @user"""
+    target = member or ctx.author
+    if target.bot:
+        return await ctx.send("Bots do not have voice levels.", delete_after=8)
+    embed = _format_level_embed(target)
+    await ctx.send(embed=embed, delete_after=45)
 
 
 @bot.command(name="checkjoincreate")
