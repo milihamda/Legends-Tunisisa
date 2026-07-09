@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import sys
 import threading
 import time
 from datetime import timedelta
@@ -2286,6 +2287,8 @@ class ControlPanelView(discord.ui.View):
 @bot.event
 async def on_ready():
     global _startup_done
+    if os.environ.pop("DISCORD_LOGIN_ATTEMPT", None):
+        print("Discord login succeeded after rate-limit backoff.")
     print(f"Logged in as {bot.user} (build {BOT_BUILD_ID})")
 
     if _startup_done:
@@ -3821,14 +3824,42 @@ def _validate_token() -> None:
         )
 
 
+def _handle_login_rate_limit(exc: discord.HTTPException) -> None:
+    """Wait out Discord login 429s instead of exiting immediately (Render restart storm)."""
+    attempt = int(os.environ.get("DISCORD_LOGIN_ATTEMPT", "1"))
+    max_attempts = max(1, int(os.getenv("DISCORD_LOGIN_MAX_ATTEMPTS", "6")))
+    retry_after = float(getattr(exc, "retry_after", 0) or 0)
+    wait = min(max(retry_after, 60), 600) if retry_after else 90
+
+    if attempt >= max_attempts:
+        raise SystemExit(
+            "Discord login still rate-limited (429) after "
+            f"{max_attempts} attempts. Stop every other instance using this token "
+            "(local PC, second Render service, bot_all_in_one.py), wait 30 minutes, "
+            "then redeploy once."
+        )
+
+    print(
+        f"Discord login rate-limited (429). Attempt {attempt}/{max_attempts}. "
+        f"Health check stays up; waiting {wait:.0f}s before a fresh login retry..."
+    )
+    time.sleep(wait)
+    os.environ["DISCORD_LOGIN_ATTEMPT"] = str(attempt + 1)
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
 if __name__ == "__main__":
     _validate_token()
 
     if os.environ.get("PORT"):
         threading.Thread(target=_start_health_server, daemon=True).start()
 
-    # bot.run() must be called only once per process — retrying on the same Client
-    # instance causes "RuntimeError: Session is closed".
+    login_delay = max(0.0, float(os.getenv("DISCORD_LOGIN_DELAY_SECONDS", "0")))
+    if login_delay:
+        print(f"Startup login delay: {login_delay:.0f}s")
+        time.sleep(login_delay)
+
+    # bot.run() must be called only once per process — on 429 we sleep then execv for a fresh Client.
     try:
         bot.run(TOKEN)
     except discord.LoginFailure:
@@ -3838,8 +3869,5 @@ if __name__ == "__main__":
         ) from None
     except discord.HTTPException as exc:
         if exc.status == 429:
-            raise SystemExit(
-                "Discord rate-limited login (429). Wait 15–30 minutes, "
-                "ensure only ONE instance uses this token (not PC + Render), then redeploy."
-            ) from None
+            _handle_login_rate_limit(exc)
         raise

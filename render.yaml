@@ -8,3 +8,5 @@ services:
     envVars:
       - key: DISCORD_TOKEN
         sync: false
+      - key: DISCORD_LOGIN_MAX_ATTEMPTS
+        value: "6"
