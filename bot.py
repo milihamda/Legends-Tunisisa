@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import discord
+from discord import app_commands
 from discord.abc import Messageable
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -2393,6 +2394,18 @@ async def on_ready():
     if os.environ.pop("DISCORD_LOGIN_ATTEMPT", None):
         print("Discord login succeeded after rate-limit backoff.")
     print(f"Logged in as {bot.user} (build {BOT_BUILD_ID})")
+    print(
+        f"Commands: prefix={COMMAND_PREFIX!r} | "
+        f"message_content intent={intents.message_content} | "
+        f"members intent={intents.members}"
+    )
+    if not intents.message_content:
+        print("WARNING: message_content intent is OFF — ?commands will not work.")
+    else:
+        print(
+            "If ?commands do not work, enable **Message Content Intent** in "
+            "Discord Developer Portal → Bot → Privileged Gateway Intents → Save."
+        )
 
     if _startup_done:
         print("Reconnect — skipping heavy startup (avoids Discord rate limits).")
@@ -2461,6 +2474,11 @@ async def on_ready():
             await asyncio.sleep(GUILD_INIT_STEP_DELAY)
 
     await bot.change_presence(status=discord.Status.dnd)
+    try:
+        synced = await bot.tree.sync()
+        print(f"Slash commands synced: {len(synced)} (/ping, /level, …)")
+    except discord.HTTPException as exc:
+        print(f"Slash command sync failed: {exc.text}")
     print("System online.")
 
 
@@ -2542,6 +2560,24 @@ async def before_update_voice_levels_task():
     await bot.wait_until_ready()
 
 
+@bot.tree.command(name="ping", description="Vérifie si le bot est en ligne")
+async def slash_ping(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        f"Pong — `{round(bot.latency * 1000)}ms` • build `{BOT_BUILD_ID}`",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="level", description="Affiche le level vocal")
+@app_commands.describe(member="Membre (optionnel)")
+async def slash_level(interaction: discord.Interaction, member: discord.Member | None = None):
+    target = member or interaction.user
+    if target.bot:
+        return await interaction.response.send_message("Les bots n'ont pas de level vocal.", ephemeral=True)
+    embed = _format_level_embed(target)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.command(name="ping")
 async def ping_cmd(ctx):
     """Check if the bot is online and responding."""
@@ -2559,6 +2595,41 @@ async def level_cmd(ctx, member: discord.Member = None):
         return await ctx.send("Bots do not have voice levels.", delete_after=8)
     embed = _format_level_embed(target)
     await ctx.send(embed=embed, delete_after=45)
+
+
+@bot.command(name="checkbot")
+@commands.has_permissions(manage_guild=True)
+async def check_bot_cmd(ctx):
+    """Diagnose why prefix commands may not work in this channel."""
+    me = ctx.guild.me
+    if me is None:
+        return await ctx.send("Bot member not found in this guild.", delete_after=12)
+
+    perms = ctx.channel.permissions_for(me)
+    muted = isinstance(ctx.author, discord.Member) and _is_chat_muted(ctx.author)
+    lines = [
+        f"**Prefix:** `{COMMAND_PREFIX}`",
+        f"**Build:** `{BOT_BUILD_ID}`",
+        f"**Message Content Intent (code):** `{intents.message_content}`",
+        f"**Read this channel:** `{'yes' if perms.read_messages else 'NO'}`",
+        f"**Send in this channel:** `{'yes' if perms.send_messages else 'NO'}`",
+        f"**Embed links:** `{'yes' if perms.embed_links else 'NO'}`",
+        f"**You are chat-muted:** `{'yes' if muted else 'no'}`",
+        "",
+        f"Test prefix: `{COMMAND_PREFIX}ping`",
+        "Test slash: `/ping` (works even without Message Content Intent)",
+    ]
+    if not perms.send_messages:
+        lines.append("\n❌ I **cannot send messages** in this channel.")
+    if not intents.message_content:
+        lines.append("\n❌ `message_content` intent is disabled in code.")
+
+    embed = discord.Embed(title="Bot diagnostics", description="\n".join(lines), color=discord.Color.blue())
+    await ctx.send(embed=embed, delete_after=60)
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
 
 
 @bot.command(name="checkjoincreate")
@@ -3743,6 +3814,9 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # Commands first — chat mute must not block ?ping / ?level before processing.
+    await bot.process_commands(message)
+
     if await _enforce_chat_mute(message):
         return
 
@@ -3751,11 +3825,18 @@ async def on_message(message):
     except Exception as exc:
         print(f"Ticket message handler failed: {exc}")
 
-    await bot.process_commands(message)
-
 
 @bot.event
 async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        content = (ctx.message.content or "").strip()
+        if content.startswith(COMMAND_PREFIX):
+            return await ctx.send(
+                f"Commande inconnue. Essaie `{COMMAND_PREFIX}ping` ou tape `/ping` (slash).",
+                delete_after=12,
+            )
+        return
+
     if isinstance(error, commands.CommandInvokeError):
         error = error.original
 
