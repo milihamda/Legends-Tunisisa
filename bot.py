@@ -1933,6 +1933,23 @@ async def post_cmd(ctx, *, message: str = None):
     await ctx.send(content or None, files=files or None)
 
 
+def _parse_giveaway_hours(raw: str) -> float:
+    """Accept `1`, `1.5` (hours) or duration tokens like `30m`, `1h`, `2d`."""
+    text = (raw or "").strip().lower()
+    if not text:
+        raise ValueError("empty duration")
+
+    duration = _parse_duration(text)
+    if duration is not None:
+        hours = duration.total_seconds() / 3600.0
+    else:
+        hours = float(text)
+
+    if hours <= 0:
+        raise ValueError("non-positive duration")
+    return hours
+
+
 @bot.command(name="giveaway")
 async def giveaway_cmd(ctx):
     global current_giveaway_view
@@ -1968,9 +1985,12 @@ async def giveaway_cmd(ctx):
         msg_prize = await bot.wait_for("message", timeout=60.0, check=check)
         prize = msg_prize.content
 
-        await ctx.author.send("⏳ **2. 9adeh men se3a bech yo93od el giveaway?**")
+        await ctx.author.send(
+            "⏳ **2. 9adeh bech yo93od el giveaway?**\n"
+            "👉 Mathalan: `1` (se3a), `1h`, `30m`, `2d`"
+        )
         msg_time = await bot.wait_for("message", timeout=60.0, check=check)
-        hours = float(msg_time.content)
+        hours = _parse_giveaway_hours(msg_time.content)
 
         await ctx.author.send("🏆 **3. 9adeh min we7ed bech yarba7?**")
         msg_winners = await bot.wait_for("message", timeout=60.0, check=check)
@@ -1987,7 +2007,10 @@ async def giveaway_cmd(ctx):
     except asyncio.TimeoutError:
         return await ctx.author.send(f"❌ Btit barcha ma jawebtnech! 3awed ekteb `{COMMAND_PREFIX}giveaway` min jdid.")
     except ValueError:
-        return await ctx.author.send("❌ Ghalta fil ar9am! 3awed min jdid w ekteb ar9am s7i7a.")
+        return await ctx.author.send(
+            "❌ Ghalta fil wa9t walla ar9am!\n"
+            f"👉 Wa9t: `1`, `1h`, `30m`, `2d` — 3awed `{COMMAND_PREFIX}giveaway`."
+        )
 
     await ctx.author.send(
         f"✅ Sayé, el giveaway hebet tawa fil serveur! (Tnajem tekteb `{COMMAND_PREFIX}stop` houni ken t7eb twa9afha wa9t ma t7eb)."
