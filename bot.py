@@ -2867,9 +2867,6 @@ async def check_join_create_cmd(ctx):
 
 
 @bot.command(name="checkticketcategory")
-
-
-@bot.command(name="checkticketcategory")
 @commands.has_permissions(manage_guild=True)
 async def check_ticket_category_cmd(ctx):
     """Show ticket category configuration (admin)."""
