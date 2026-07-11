@@ -12,7 +12,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py welcome_card.py punishment_card.py bot_all_in_one.py .env.example ./
+COPY bot.py welcome_card.py punishment_card.py level_up_card.py bot_all_in_one.py .env.example ./
 COPY punshmentimg/ ./punshmentimg/
 RUN mkdir -p data
 
