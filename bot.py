@@ -1664,6 +1664,33 @@ async def test_welcome_cmd(ctx, member: discord.Member = None):
         await ctx.send(f"Welcome test failed: {e}")
 
 
+@bot.command(name="testlevel", aliases=["testlvl", "testlevelup"])
+async def test_level_cmd(
+    ctx,
+    member: discord.Member = None,
+    old_level: int = 4,
+    new_level: int = 5,
+):
+    """Preview level-up card. Usage: ?testlevel [@user] [old] [new]"""
+    target = member or ctx.author
+    if target.bot:
+        return await ctx.send("Bots do not have voice levels.", delete_after=8)
+    if old_level < 0 or new_level < 0:
+        return await ctx.send("Levels must be >= 0.", delete_after=8)
+    if new_level <= old_level:
+        new_level = old_level + 1
+
+    content_msg = f"🎉 {target.mention} reached **Level {new_level}**! (was {old_level}) *(test)*"
+    try:
+        buffer = await build_level_up_card(target, old_level, new_level)
+        await ctx.send(
+            content=content_msg,
+            file=discord.File(buffer, filename="level_up.png"),
+        )
+    except Exception as e:
+        await ctx.send(f"Level card test failed: {e}")
+
+
 @bot.command(name="setnotifications", aliases=["mentionsonly", "notifmentions"])
 @commands.has_permissions(manage_guild=True)
 async def set_notifications_cmd(ctx):
