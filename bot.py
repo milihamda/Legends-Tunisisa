@@ -144,6 +144,11 @@ LEVELS_BACKUP_HOURS = max(1.0, float(os.getenv("LEVELS_BACKUP_HOURS", "1")))
 LEVELS_BACKUP_MARKER = "LEGENDS_LEVELS_BACKUP"
 LEVELS_BACKUP_FILENAME = "levels_database.json"
 LEVELS_BACKUP_KEEP = max(1, int(os.getenv("LEVELS_BACKUP_KEEP", "5")))
+LEVELS_RESTORE_FROM_DISCORD = os.getenv("LEVELS_RESTORE_FROM_DISCORD", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 BOT_CHAT_KEEPALIVE_MINUTES = max(5.0, float(os.getenv("BOT_CHAT_KEEPALIVE_MINUTES", "30")))
 EMPTY_ROOM_CLEANUP_MINUTES = max(5.0, float(os.getenv("EMPTY_ROOM_CLEANUP_MINUTES", "10")))
@@ -2514,10 +2519,16 @@ async def on_ready():
 
     _load_warnings()
     _load_levels_database()
-    if await _restore_levels_from_discord():
-        print("Using Discord levels backup as source of truth.")
+    if LEVELS_RESTORE_FROM_DISCORD:
+        if await _restore_levels_from_discord():
+            print("Using Discord levels backup as source of truth.")
+        else:
+            print("Using local levels file (no Discord backup yet).")
     else:
-        print("Using local levels file (no Discord backup yet).")
+        print(
+            f"Using local levels file only ({len(user_levels)} records) — "
+            "LEVELS_RESTORE_FROM_DISCORD is off."
+        )
     await _post_levels_backup(reason="startup")
     print(
         f"Rate-limit settings: bot-chat keepalive {BOT_CHAT_KEEPALIVE_MINUTES}m, "
@@ -2954,6 +2965,21 @@ async def backup_levels_cmd(ctx):
         await ctx.send("✅ Levels backup t7at fil channel.", delete_after=10)
     else:
         await ctx.send("❌ Backup fashal — chouf logs / channel ID.", delete_after=12)
+
+
+@bot.command(name="reloadlevels", aliases=["loadlevels"])
+@commands.has_permissions(manage_guild=True)
+async def reload_levels_cmd(ctx):
+    """Reload levels from data/levels_database.json (ignores Discord backup)."""
+    _load_levels_database()
+    await ctx.send(
+        f"✅ Reloaded **{len(user_levels)}** level records from `{LEVELS_DB_FILE}`.",
+        delete_after=12,
+    )
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
 
 
 @bot.command(name="setnotifications", aliases=["mentionsonly", "notifmentions"])
