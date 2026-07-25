@@ -4026,6 +4026,39 @@ async def warnings_cmd(ctx, member: discord.Member = None):
         pass
 
 
+@bot.command(name="clear", aliases=["purge", "clean"])
+@commands.has_permissions(manage_messages=True)
+@commands.bot_has_permissions(manage_messages=True, read_message_history=True)
+async def clear_cmd(ctx, amount: int = 10):
+    """Delete recent messages. Usage: ?clear or ?clear 20"""
+    if not isinstance(ctx.channel, discord.TextChannel):
+        return await ctx.send("Use this command in a text channel.", delete_after=8)
+
+    if amount < 1:
+        return await ctx.send("Amount must be at least **1**.", delete_after=8)
+    if amount > 100:
+        amount = 100
+
+    try:
+        deleted = await ctx.channel.purge(limit=amount)
+    except discord.Forbidden:
+        return await ctx.send(
+            "I need **Manage Messages** and **Read Message History** in this channel.",
+            delete_after=10,
+        )
+    except discord.HTTPException as exc:
+        return await ctx.send(f"Could not clear messages: {exc.text}", delete_after=10)
+
+    note = ""
+    if len(deleted) < amount:
+        note = " (some messages may be older than 14 days — Discord blocks bulk delete.)"
+
+    await ctx.send(
+        f"🧹 Deleted **{len(deleted)}** message(s).{note}",
+        delete_after=6,
+    )
+
+
 @bot.command(name="clearwarn", aliases=["removewarn", "unwarn", "clearwarnings"])
 @_punishment_staff_check()
 async def clearwarn_cmd(ctx, member: discord.Member, amount: str = "all"):
