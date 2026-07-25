@@ -150,6 +150,40 @@ LEVELS_RESTORE_FROM_DISCORD = os.getenv("LEVELS_RESTORE_FROM_DISCORD", "true").l
     "yes",
 )
 
+
+def _env_role_id(name: str, default: int = 0) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw or raw.lower() in ("0", "none", "false"):
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"Invalid {name}={raw!r} — must be a numeric Discord role ID.")
+        return default
+
+
+# Voice level → role ID. Edit IDs here (0 = disabled).
+# Developer Mode → Roles → right-click role → Copy ID
+LEVEL_ROLE_MILESTONES: dict[int, int] = {
+    5: 1526536541273460777,   # Level 5 role ID
+    10: 1518012453001232526,   # Level 10 role ID
+    15: 1530604085898903693,   # Level 15 role ID
+    20: 1518012596824047677,   # Level 20 role ID
+    30: 1518012707553546421,  # Level 30 role ID
+    40: 1518012815116468284,  # Level 40 role ID
+    50: 1518012943940325406 ,  # Level 50 role ID
+    60: 1518805640594850002,  # Level 60 role ID
+    70: 1518805913530535987,  # Level 70 role ID
+    80: 15188060760097465430,  # Level 80 role ID
+    90: 1518806185896185936,  # Level 90 role ID
+    100: 1518806344373637271,  # Level 100 role ID
+}
+# Optional: Render env LEVEL_ROLE_10=… overrides the value above when set.
+for _lvl in LEVEL_ROLE_MILESTONES:
+    _env_rid = _env_role_id(f"LEVEL_ROLE_{_lvl}")
+    if _env_rid:
+        LEVEL_ROLE_MILESTONES[_lvl] = _env_rid
+
 BOT_CHAT_KEEPALIVE_MINUTES = max(5.0, float(os.getenv("BOT_CHAT_KEEPALIVE_MINUTES", "30")))
 EMPTY_ROOM_CLEANUP_MINUTES = max(5.0, float(os.getenv("EMPTY_ROOM_CLEANUP_MINUTES", "10")))
 PUNISHMENT_POST_CAP = max(1, int(os.getenv("PUNISHMENT_POST_CAP", "5")))
@@ -2249,6 +2283,70 @@ async def _restore_levels_from_discord() -> bool:
     return False
 
 
+def _active_level_role_milestones() -> list[tuple[int, int]]:
+    return sorted([(lvl, rid) for lvl, rid in LEVEL_ROLE_MILESTONES.items() if rid > 0])
+
+
+def _level_role_ids_for_level(level: int) -> list[int]:
+    return [rid for lvl, rid in _active_level_role_milestones() if level >= lvl]
+
+
+def _level_milestones_crossed(old_level: int, new_level: int) -> list[tuple[int, int]]:
+    return [
+        (lvl, rid)
+        for lvl, rid in _active_level_role_milestones()
+        if old_level < lvl <= new_level
+    ]
+
+
+async def _apply_level_role_rewards(
+    member: discord.Member,
+    old_level: int,
+    new_level: int,
+) -> list[discord.Role]:
+    granted: list[discord.Role] = []
+    for milestone_level, role_id in _level_milestones_crossed(old_level, new_level):
+        role = member.guild.get_role(role_id)
+        if role is None:
+            print(f"Level role missing: milestone {milestone_level} → role {role_id}")
+            continue
+        if role in member.roles:
+            continue
+        try:
+            await member.add_roles(role, reason=f"Reached voice level {milestone_level}")
+            granted.append(role)
+        except discord.Forbidden:
+            print(
+                f"Cannot assign level role {role.name} ({role_id}) to {member.id} "
+                "(move bot role above level roles)."
+            )
+        except discord.HTTPException as exc:
+            print(f"Level role assign failed for {member.id}: {exc.text}")
+    return granted
+
+
+async def _sync_member_level_roles(member: discord.Member, level: int) -> list[discord.Role]:
+    """Ensure member has every milestone role they qualify for."""
+    target_ids = set(_level_role_ids_for_level(level))
+    all_level_role_ids = {rid for _, rid in _active_level_role_milestones()}
+    to_add = [
+        member.guild.get_role(rid)
+        for rid in target_ids
+        if member.guild.get_role(rid) and member.guild.get_role(rid) not in member.roles
+    ]
+    if not to_add:
+        return []
+    try:
+        await member.add_roles(*to_add, reason=f"Sync voice level {level} milestone roles")
+        return to_add
+    except discord.Forbidden:
+        print(f"Cannot sync level roles for {member.id} (check bot role hierarchy).")
+        return []
+    except discord.HTTPException as exc:
+        print(f"Level role sync failed for {member.id}: {exc.text}")
+        return []
+
+
 def _format_level_embed(target: discord.Member) -> discord.Embed:
     data = _get_user_level_data(target.id)
     minutes = data["voice_minutes"]
@@ -2530,6 +2628,14 @@ async def on_ready():
             "LEVELS_RESTORE_FROM_DISCORD is off."
         )
     await _post_levels_backup(reason="startup")
+    milestones = _active_level_role_milestones()
+    if milestones:
+        print(
+            "Level role milestones: "
+            + ", ".join(f"lvl {lvl}→{rid}" for lvl, rid in milestones)
+        )
+    else:
+        print("Level role milestones: none configured (set LEVEL_ROLE_10, … in env).")
     print(
         f"Rate-limit settings: bot-chat keepalive {BOT_CHAT_KEEPALIVE_MINUTES}m, "
         f"punishment cap {PUNISHMENT_POST_CAP}/min, welcome cap {WELCOME_POST_CAP}/min"
@@ -2620,43 +2726,6 @@ async def empty_temp_rooms_cleanup_task():
             print(f"Empty temp room cleanup failed for {guild.name}: {e}")
 
 
-@tasks.loop(minutes=1.0)
-async def update_voice_levels_task():
-    changed = False
-    level_ups: list[tuple[discord.Guild, discord.Member, int, int]] = []
-    skip_ids = _JOIN_TO_CREATE_HUB_IDS | {BOT_VOICE_CHANNEL_ID}
-
-    for guild in bot.guilds:
-        for vc in guild.voice_channels:
-            if vc.id in skip_ids or not vc.members:
-                continue
-            for member in vc.members:
-                if member.bot or not member.voice or member.voice.self_deaf:
-                    continue
-                entry = _normalize_user_level_data(user_levels.get(member.id, {}))
-                old_level = entry["level"]
-                entry["voice_minutes"] += 1
-                entry["level"] = _level_from_voice_minutes(entry["voice_minutes"])
-                user_levels[member.id] = entry
-                changed = True
-                if entry["level"] > old_level:
-                    level_ups.append((guild, member, old_level, entry["level"]))
-
-    if changed:
-        _save_levels_database()
-
-    for guild, member, old_level, new_level in level_ups:
-        log_channel = guild.get_channel(LEVEL_LOG_CHANNEL_ID)
-        if not log_channel:
-            continue
-        try:
-            await log_channel.send(
-                f"🎉 {member.mention} reached **Level {new_level}**! (was {old_level})"
-            )
-        except discord.HTTPException as exc:
-            print(f"Level-up announce failed for {member.id}: {exc.text}")
-
-
 @bot_chat_keepalive_task.before_loop
 async def before_bot_chat_keepalive_task():
     await bot.wait_until_ready()
@@ -2693,10 +2762,17 @@ async def update_voice_levels_task():
         _save_levels_database()
 
     for guild, member, old_level, new_level in level_ups:
+        granted_roles = await _apply_level_role_rewards(member, old_level, new_level)
+        role_note = ""
+        if granted_roles:
+            role_note = " | Roles: " + ", ".join(f"**{r.name}**" for r in granted_roles)
+
         log_channel = guild.get_channel(LEVEL_LOG_CHANNEL_ID)
         if not log_channel:
             continue
-        content_msg = f"🎉 {member.mention} reached **Level {new_level}**! (was {old_level})"
+        content_msg = (
+            f"🎉 {member.mention} reached **Level {new_level}**! (was {old_level}){role_note}"
+        )
         try:
             buffer = await build_level_up_card(member, old_level, new_level)
             await log_channel.send(
@@ -2709,11 +2785,6 @@ async def update_voice_levels_task():
                 await log_channel.send(content_msg)
             except discord.HTTPException as send_exc:
                 print(f"Level-up announce failed for {member.id}: {send_exc.text}")
-
-
-@bot_chat_keepalive_task.before_loop
-async def before_bot_chat_keepalive_task():
-    await bot.wait_until_ready()
 
 
 @update_voice_levels_task.before_loop
@@ -2975,6 +3046,51 @@ async def reload_levels_cmd(ctx):
     await ctx.send(
         f"✅ Reloaded **{len(user_levels)}** level records from `{LEVELS_DB_FILE}`.",
         delete_after=12,
+    )
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+
+
+@bot.command(name="synclevelroles", aliases=["synclevelrole"])
+@commands.has_permissions(manage_guild=True)
+async def sync_level_roles_cmd(ctx, member: discord.Member = None):
+    """Give missing level milestone roles based on current voice level."""
+    milestones = _active_level_role_milestones()
+    if not milestones:
+        return await ctx.send(
+            "No level roles configured. Set `LEVEL_ROLE_10`, `LEVEL_ROLE_20`, … in Render "
+            "or edit `LEVEL_ROLE_MILESTONES` in bot.py.",
+            delete_after=15,
+        )
+
+    guild = ctx.guild
+    targets: list[discord.Member] = []
+    if member:
+        if member.bot:
+            return await ctx.send("Bots do not have voice levels.", delete_after=8)
+        targets = [member]
+    else:
+        for user_id in user_levels:
+            m = guild.get_member(user_id)
+            if m and not m.bot:
+                targets.append(m)
+
+    if not targets:
+        return await ctx.send("No members with level data found.", delete_after=10)
+
+    granted_count = 0
+    for target in targets:
+        level = _get_user_level_data(target.id)["level"]
+        added = await _sync_member_level_roles(target, level)
+        granted_count += len(added)
+        if SYNCROLES_MEMBER_DELAY:
+            await asyncio.sleep(SYNCROLES_MEMBER_DELAY)
+
+    await ctx.send(
+        f"✅ Synced level roles for **{len(targets)}** member(s) — **{granted_count}** role(s) added.",
+        delete_after=15,
     )
     try:
         await ctx.message.delete()
